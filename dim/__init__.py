@@ -6,6 +6,7 @@ import dis
 from .tree_map import tree_flatten, tree_map
 from collections import defaultdict
 from .wrap_type import wrap_type
+import dim._C as _C
 
 class DimensionMismatchError(Exception):
     pass
@@ -389,52 +390,26 @@ softmax = _wrap(torch.nn.functional.softmax, single_dim=True, reduce=False)
 # scatter_reduce
 
 
-class Dim(_Tensor):
+class Dim(_C.Dim, _Tensor):
     def __init__(self, name: str, size: Union[None, int]=None):
-        self._name = name
-        self._size = None
+        super().__init__(name, size)
         self.level = _alloc_level()
-        if size is not None:
-            self.size = size
+
+
+    __hash__ = object.__hash__
 
     def __del__(self):
         _free_level(self.level)
-
-    @property
-    def size(self):
-        assert self.is_bound
-        return self._size
-
-    @size.setter
-    def size(self, size: int):
-        if self._size is None:
-            self._size = size
-        elif self._size != size:
-            raise DimensionBindError(f"Dim '{self}' previously bound to a dimension of size {self._size} cannot bind to a dimension of size {size}")
-
-    @property
-    def is_bound(self):
-        return self._size is not None
-
-    def __repr__(self):
-        return self._name
-
-    def __format__(self, format_spec):
-        return str(self)
 
     def __eq__(self, o):
         if not isinstance(o, Dim) and isinstance(o, TensorLike):
             return torch.Tensor.__eq__(self, o)
         return object.__eq__(self, o)
 
-
     def __ne__(self, o):
         if not isinstance(o, Dim) and isinstance(o, TensorLike):
             return torch.Tensor.__ne__(self, o)
         return object.__ne__(self, o)
-
-    def __hash__(self):
-        return object.__hash__(self)
 
     @property
     def _batchtensor(self):

@@ -235,10 +235,10 @@ PyTypeObject Dim::Type = {
     0,                              /* tp_setattr */
     0,                              /* tp_as_async */
     (reprfunc)Dim_repr,           /* tp_repr */
-    &Tensor_numbers,                 /* tp_as_number */
+    0,                 /* tp_as_number */
     0,                              /* tp_as_sequence */
     0,                              /* tp_as_mapping */
-    PyBaseObject_Type.tp_hash,      /* tp_hash */
+    0,      /* tp_hash */
     0,                              /* tp_call */
     0,                              /* tp_str */
     0,                              /* tp_getattro */
@@ -248,7 +248,7 @@ PyTypeObject Dim::Type = {
     "Dim Object",                   /* tp_doc */
     0,                              /* tp_traverse */
     0,                              /* tp_clear */
-    (richcmpfunc) Dim_richcompare,  /* tp_richcompare */
+    0,  /* tp_richcompare */
     0,                              /* tp_weaklistoffset */
     0,                              /* tp_iter */
     0,                              /* tp_iternext */
@@ -1478,6 +1478,28 @@ static PyObject* test_c(PyObject *self,
     PY_END(nullptr);
 }
 
+static PyObject* call_torch_function(PyObject* self, PyObject* args, PyObject* kwargs) {
+    PY_BEGIN
+    auto orig = py::handle(PyTuple_GET_ITEM(self, 0));
+    auto torch_function = py::handle(PyTuple_GET_ITEM(self, 1));
+    return torch_function.call(orig, py::handle(Py_None), py::handle(args), py::handle(kwargs)).release();
+    PY_END(nullptr)
+}
+
+static PyObject* _wrap_method(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+    AT_ASSERT(nargs == 2);
+    PyMethodDef* md = new PyMethodDef {"wrapper", (PyCFunction) call_torch_function, METH_VARARGS | METH_KEYWORDS }; // leaks PyMethodDef
+    py::tuple s(2);
+    s.set(0, py::object::borrow(args[0]));
+    s.set(1, py::object::borrow(args[1]));
+    auto r = py::object::checked_steal(PyCFunction_New(md, s.release()));
+    return PyInstanceMethod_New(r.release());
+    PY_END(nullptr);
+}
 
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
@@ -1486,6 +1508,7 @@ static PyMethodDef methods[] = {
     {"_reduce", (PyCFunction) _reduce, METH_FASTCALL | METH_KEYWORDS},
     {"_with_dims", (PyCFunction) _with_dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
+    {"_wrap_method", (PyCFunction) _wrap_method, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };

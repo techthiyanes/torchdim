@@ -1,17 +1,19 @@
 import torch
 from types import FunctionType, BuiltinMethodType, MethodDescriptorType, WrapperDescriptorType, GetSetDescriptorType
 from pprint import pprint
+from dim._C import _wrap_method
 
 FUNC_TYPES = (FunctionType, MethodDescriptorType, BuiltinMethodType, WrapperDescriptorType)
 PROPERTY_TYPES = (GetSetDescriptorType,property)
 
-def wrap_method(orig, __torch_function__):
-    def impl(*args, **kwargs):
-        return __torch_function__(orig, None, args, kwargs)
-    return impl
+# def _wrap_method(orig, __torch_function__):
+#     def impl(*args, **kwargs):
+#         return __torch_function__(orig, None, args, kwargs)
+#     return impl
 
-def wrap_attr(orig, __torch_function__):
-    return property(wrap_method(orig.__get__, __torch_function__))
+
+def _wrap_attr(orig, __torch_function__):
+    return property(_wrap_method(orig.__get__, __torch_function__))
 
 def wrap_type(to_patch, pattern, __torch_function__):
     all = {}
@@ -28,6 +30,6 @@ def wrap_type(to_patch, pattern, __torch_function__):
             continue
 
         if isinstance(obj, FUNC_TYPES):
-            setattr(to_patch, name, wrap_method(obj, __torch_function__))
+            setattr(to_patch, name, _wrap_method(obj, __torch_function__))
         elif isinstance(obj, PROPERTY_TYPES):
-            setattr(to_patch, name, wrap_attr(obj, __torch_function__))
+            setattr(to_patch, name, _wrap_attr(obj, __torch_function__))
