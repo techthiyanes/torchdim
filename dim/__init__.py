@@ -5,6 +5,7 @@ import inspect
 import dis
 from .tree_map import tree_flatten, tree_map
 from collections import defaultdict
+from .wrap_type import wrap_type
 
 class DimensionMismatchError(Exception):
     pass
@@ -16,26 +17,10 @@ from functools import reduce
 import operator
 prod = lambda x: reduce(operator.mul, x, 1)
 
-def _levels_debug(bt, dims):
-    if not isinstance(bt, torch.Tensor):
-        return None
-    ptensor, levels = _remove_batch_dims(bt)
-    for d in dims:
-        try:
-            levels[levels.index(d.level)] = d
-        except ValueError:
-            pass
-    return (levels, ptensor.size())
-
 # pointwise operators can go through a faster pathway
 pointwise = {torch.Tensor.add, torch.Tensor.sub, torch.Tensor.div, torch.nn.functional.dropout}
 
-class _Tensor(torch.Tensor):
-    def __new__(cls, *args, **kwargs):
-        # ????
-        return super().__new__(cls)
-
-
+class _Tensor:
     # fast path around slow wrapping/unwrapping logic for simply queries used
     # by the implementation...
     @property
@@ -74,7 +59,7 @@ class _Tensor(torch.Tensor):
             arg_levels = []
             to_expand = []
             for i,f in enumerate(flat_args):
-                if isinstance(f, torch.Tensor):
+                if isinstance(f, TensorLike):
                     ptensor, levels = _maybe_remove_batch_dims(f, levels_to_dim)
                     if isinstance(f, _Tensor) and not f._has_device and device_holding_tensor is not None:
                         ptensor = ptensor.to(device=device_holding_tensor.device)
@@ -90,13 +75,13 @@ class _Tensor(torch.Tensor):
             result = orig(*args, **kwargs)
             result_levels = [r.level if isinstance(r, Dim) else 0 for r in result_levels]
             def wrap(t):
-                if isinstance(t, torch.Tensor):
+                if isinstance(t, TensorLike):
                     return Tensor(_add_batch_dims(t, result_levels), tuple(all_dims), device_holding_tensor is not None)
                 return t
             return tree_map(wrap, result)
         else:
             def wrap(t):
-                if isinstance(t, torch.Tensor):
+                if isinstance(t, TensorLike):
                     return Tensor(t, tuple(all_dims), device_holding_tensor is not None)
                 return t
             with _enable_layers(all_dims):
@@ -201,7 +186,7 @@ class _Tensor(torch.Tensor):
     #
     def expand(self, *sizes):
         if not _contains_dim(sizes):
-            return super().expand(*sizes)
+            return self.__torch_function__(torch.Tensor.expand, None, (self, *sizes))
         dims = sizes
         sizes = [d.size for d in dims] + [-1]*self.ndim
         self = self.expand(*sizes)
@@ -210,11 +195,12 @@ class _Tensor(torch.Tensor):
 
     def gather(self, dims, values):
         if isinstance(dims, int):
-            return super().gather(dims, values)
+            return self.__torch_function__(torch.Tensor.gather, None, (self, dims, values))
+
         dims = _dims(dims, None, False, False)
         if not isinstance(values, (list, tuple, DimList)):
             values = (values,)
-        add_dim = any(isinstance(v, torch.Tensor) and v.ndim == 0 for v in values)
+        add_dim = any(isinstance(v, TensorLike) and v.ndim == 0 for v in values)
         if add_dim: # add/remove fake dimension to trick advanced indexing
             values = tuple(v[None] for v in values)
         r = self.positional(*dims)[values]
@@ -264,6 +250,8 @@ class _Tensor(torch.Tensor):
                 return self._flatten(f, t)
         else:
             return self._block(f, [t] if isinstance(t, Dim) else t)
+
+TensorLike = (_Tensor, torch.Tensor)
 
 # XXX - dim is optional and can be the outer-most dimension...
 def stack(tensors, new_dim, dim=0, out=None):
@@ -323,7 +311,7 @@ def _wrap(orig, dim_offset=0, keepdim_offset=1, dim_name='dim', single_dim=False
         args = list(args)
         _patcharg(dim_name, dim_offset, args, kwargs, dim_indices)
         def wrap(t):
-            if isinstance(t, torch.Tensor):
+            if isinstance(t, TensorLike):
                 return Tensor.create(_add_batch_dims(t, new_levels), new_dims, self._has_device)
             return t
         with _enable_layers(new_dims):
@@ -435,14 +423,14 @@ class Dim(_Tensor):
         return str(self)
 
     def __eq__(self, o):
-        if not isinstance(o, Dim) and isinstance(o, torch.Tensor):
-            return super().__eq__(o)
+        if not isinstance(o, Dim) and isinstance(o, TensorLike):
+            return torch.Tensor.__eq__(self, o)
         return object.__eq__(self, o)
 
 
     def __ne__(self, o):
-        if not isinstance(o, Dim) and isinstance(o, torch.Tensor):
-            return super().__ne__(o)
+        if not isinstance(o, Dim) and isinstance(o, TensorLike):
+            return torch.Tensor.__ne__(self, o)
         return object.__ne__(self, o)
 
     def __hash__(self):
@@ -563,7 +551,7 @@ def dims(lists=0):
 
 class Tensor(_Tensor):
     def __init__(self, batchtensor, dims, has_device):
-        assert isinstance(batchtensor, torch.Tensor)
+        assert isinstance(batchtensor, TensorLike)
         assert not isinstance(batchtensor, _Tensor)
         assert isinstance(dims, tuple)
         assert len(dims) >= 1 # otherwise this should just be a normal tensor
@@ -700,8 +688,11 @@ def __getitem__(self, input):
     if (not isinstance(input, Dim) and
         not isinstance(input, tuple) and
         # WAR for functorch bug where zero time tensors in getitem are not handled correctly.
-        not (isinstance(input, torch.Tensor) and input.ndim == 0)):
-            return _orig_getitem(self, input)
+        not (isinstance(input, TensorLike) and input.ndim == 0)):
+            if isinstance(self, _Tensor):
+                return _Tensor.__torch_function__(_orig_getitem, None, (self, input))
+            else:
+                return _orig_getitem(self, input)
 
     # can further optimize this case
     if not isinstance(input, tuple):
@@ -809,7 +800,7 @@ def __getitem__(self, input):
         if isinstance(inp, Dim) and dims_seen[inp] == 1:
             flat_inputs[i] = no_slice
             result_levels.append(inp)
-        elif isinstance(inp, torch.Tensor):
+        elif isinstance(inp, TensorLike):
             requires_getindex = True
             if tensor_insert_point is None:
                 tensor_insert_point = len(result_levels)
@@ -845,6 +836,7 @@ def __getitem__(self, input):
 
 
 torch.Tensor.__getitem__ = __getitem__
+_Tensor.__getitem__ = __getitem__
 
 _orig_split = torch.Tensor.split
 def split(self, split_size_or_sections, dim=0):
@@ -883,3 +875,6 @@ def split(self, split_size_or_sections, dim=0):
     return tuple(_bind(t, (dim,), (d,)) for d, t in zip(split_size_or_sections, _orig_split(self, sizes, dim=dim)))
 
 torch.Tensor.split = split
+_Tensor.split = split
+
+wrap_type(_Tensor, torch.Tensor)

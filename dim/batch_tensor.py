@@ -20,8 +20,8 @@ def _enable_layers(dims):
     global _enabled
     assert not _enabled
     n = len(dims)
+    input = list(sorted((-d.level, d.size) for d in dims))
     try:
-        input = sorted((-d.level, d.size) for d in dims)
         #print("BEGIN ", dims, input)
         #import pdb; pdb.set_trace()
         _vmap_add_layers(input)
