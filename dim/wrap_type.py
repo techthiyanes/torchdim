@@ -5,15 +5,15 @@ from pprint import pprint
 FUNC_TYPES = (FunctionType, MethodDescriptorType, BuiltinMethodType, WrapperDescriptorType)
 PROPERTY_TYPES = (GetSetDescriptorType,property)
 
-def wrap_method(orig):
+def wrap_method(orig, __torch_function__):
     def impl(*args, **kwargs):
-        return type(args[0]).__torch_function__(orig, None, args, kwargs)
+        return __torch_function__(orig, None, args, kwargs)
     return impl
 
-def wrap_attr(orig):
-    return property(wrap_method(orig.__get__))
+def wrap_attr(orig, __torch_function__):
+    return property(wrap_method(orig.__get__, __torch_function__))
 
-def wrap_type(to_patch, pattern):
+def wrap_type(to_patch, pattern, __torch_function__):
     all = {}
     for t in reversed(pattern.mro()[:-1]): # skip object
         all.update(t.__dict__)
@@ -28,6 +28,6 @@ def wrap_type(to_patch, pattern):
             continue
 
         if isinstance(obj, FUNC_TYPES):
-            setattr(to_patch, name, wrap_method(obj))
+            setattr(to_patch, name, wrap_method(obj, __torch_function__))
         elif isinstance(obj, PROPERTY_TYPES):
-            setattr(to_patch, name, wrap_attr(obj))
+            setattr(to_patch, name, wrap_attr(obj, __torch_function__))
