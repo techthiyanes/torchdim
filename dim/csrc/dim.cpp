@@ -82,6 +82,36 @@ private:
     int64_t size_;
 };
 
+struct DimEntry {
+    // union of either a negative number indicating which dimension this is from the rhs,
+    // or a pointer to a first-class dimension.
+    // pointers do not have their highest bit set, so checking the number is negative tells us
+    // that it is not a dim.
+    bool is_positional() const {
+        return data_ < 0;
+    }
+    int64_t position() const {
+        return data_;
+    }
+    py::hdl<Dim> dim() const {
+        Dim* result;
+        std::memcpy(&result, &data_, sizeof(Dim*));
+        return py::hdl<Dim>(result);
+    }
+
+    DimEntry()
+    : data_(0) {}
+
+    DimEntry(int64_t pos)
+    : data_(pos) {
+        AT_ASSERT(pos < 0);
+    }
+    DimEntry(py::hdl<Dim> d) {
+       std::memcpy(&data_, &d, sizeof(int64_t));
+    }
+private:
+    int64_t data_;
+};
 
 // Dim wrapper methods
 
@@ -463,7 +493,7 @@ struct Tensor : public py::base<Tensor> {
 public:
     at::Tensor tensor_;
     at::Tensor batchtensor_;
-    py::object levels_;
+    OwnedSlice<DimEntry> levels_;
     bool has_device_;
 
     static PyTypeObject Type;
@@ -477,8 +507,9 @@ public:
 };
 
 static int Tensor_init(Tensor *self, PyObject *args, PyObject *kwargs) {
+    Arena A;
     PY_BEGIN
-    #define ARGS(_) _(py::handle, tensor) _(py::handle, levels) _(int, has_device) _(py::handle, batchtensor)
+    #define ARGS(_) _(py::handle, tensor) _(py::handle, py_levels) _(int, has_device) _(py::handle, batchtensor)
     MPY_PARSE_ARGS_KWARGS("OOpO", ARGS)
 
     if (!THPVariable_Check(tensor.ptr())) {
@@ -488,7 +519,27 @@ static int Tensor_init(Tensor *self, PyObject *args, PyObject *kwargs) {
         py::raise_error(PyExc_ValueError, "_batchtensor is not a Tensor?");
     }
     self->tensor_ = THPVariable_Unpack(tensor.ptr());
-    self->levels_ = py::object::borrow(levels);
+    Slice<DimEntry> levels;
+    py::sequence_view sq(py_levels);
+    for (auto i : c10::irange(sq.size())) {
+        py::object v = sq[i];
+        if (py::is_int(v)) {
+            levels = levels.append(A, py::to_int(v));
+        } else {
+            auto dim = Dim::wrap(std::move(v));
+            py::hdl<Dim> hdim = dim;
+            levels = levels.append(A, hdim);
+            dim.release();
+        }
+    }
+    self->levels_.set(levels, [](Slice<DimEntry> s) {
+        for(auto e : s) {
+            if (!e.is_positional()) {
+                py::object::steal(e.dim());
+            }
+        }
+    });
+
     self->has_device_ = has_device != 0;
     self->batchtensor_ = THPVariable_Unpack(batchtensor.ptr());
     return 0;
@@ -500,8 +551,14 @@ static PyGetSetDef Tensor_getsetters[] = {
    {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->tensor_); }, NULL},
    {"_batchtensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->batchtensor_); }, NULL},
    {"_levels", (getter) [](PyObject* self, void*) -> PyObject* {
-       py::object levels = ((Tensor*)self)->levels_;
-       return levels.release();
+       PY_BEGIN
+       auto slice = ((Tensor*)self)->levels_.slice();
+       py::tuple t(slice.size());
+       for (auto i : slice.enumerate()) {
+            t.set(i, slice[i].is_positional() ?  py::from_int(slice[i].position()) : py::object::borrow(slice[i].dim()));
+       }
+       return t.release();
+       PY_END(nullptr)
    }},
     {NULL}  /* Sentinel */
 };

@@ -9,6 +9,8 @@ inline int round2(int num) {
 }
 
 struct Arena;
+template<typename T>
+struct OwnedSlice;
 
 template<typename T>
 struct Slice {
@@ -82,7 +84,7 @@ struct Slice {
         return c10::irange(size_);
     }
 
-private:
+protected:
     Slice(T* begin, T* end)
     : begin_(begin), size_(end - begin), capacity_(size_) {}
 
@@ -104,8 +106,37 @@ private:
     T* begin_;
     int size_;
     int capacity_;
+    friend struct OwnedSlice<T>;
 };
 
+template<typename T>
+struct OwnedSlice : public Slice<T> {
+    typedef void (*deleter_t)(Slice<T>);
+    static void _no_delete(Slice<T>) {}
+    OwnedSlice()
+    : deleter_(_no_delete) {}
+    OwnedSlice(const OwnedSlice&) = delete;
+    OwnedSlice& operator=(const OwnedSlice&) = delete;
+    ~OwnedSlice() {
+        deleter_(slice_);
+        if (slice_.size_ > 8) {
+            delete [] slice_.begin_;
+        }
+    }
+    void set(Slice<T> to_own, deleter_t deleter = _no_delete) {
+        slice_.size_ = slice_.capacity_ = to_own.size();
+        slice_.begin_ = (slice_.size_ > 8) ? new T[slice_.size_] : &small_buf[0];
+        std::memcpy(slice_.begin_, to_own.begin(), slice_.size_ * sizeof(T));
+        deleter_ = deleter;
+    }
+    Slice<T> slice() const {
+        return slice_;
+    }
+private:
+    Slice<T> slice_;
+    deleter_t deleter_;
+    T small_buf[8];
+};
 
 template<typename T>
 inline std::ostream& operator<<(std::ostream& s, const Slice<T>& v) {

@@ -252,8 +252,6 @@ struct tuple : public object {
     : object(checked_steal(PyTuple_New(size))) {}
 };
 
-
-
 py::object unicode_from_format(const char* format, ...) {
     va_list args;
     va_start(args, format);
