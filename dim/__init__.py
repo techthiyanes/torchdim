@@ -1,5 +1,5 @@
 import torch
-from .batch_tensor import _add_batch_dims, _remove_batch_dims, _alloc_level, _free_level, _enable_layers
+from .batch_tensor import _add_batch_dims, _remove_batch_dims, _enable_layers
 from typing import Union, Sequence
 import inspect
 import dis
@@ -369,9 +369,6 @@ class Dim(_C.Dim, _Tensor):
 
     __hash__ = object.__hash__
 
-    def __del__(self):
-        _free_level(self)
-
     def __eq__(self, o):
         if not isinstance(o, Dim) and isinstance(o, TensorLike):
             return torch.Tensor.__eq__(self, o)
@@ -428,17 +425,7 @@ def _bind_one_dim(lhs: 'Dim', rhs: 'Sequence[Dim]'):
     else:
         _bind_dims_to_size(lhs.size, rhs, lhs)
 
-class Tensor(_Tensor):
-    def __init__(self, tensor, levels, has_device, batchtensor):
-        assert isinstance(batchtensor, torch.Tensor)
-        assert not isinstance(batchtensor, _Tensor)
-        assert isinstance(levels, tuple)
-        assert any(isinstance(d, Dim) for d in levels)
-        self._tensor = tensor
-        self._levels = levels
-        self._batchtensor = batchtensor
-        self._has_device = has_device
-
+class Tensor(_Tensor, _C.Tensor):
     @staticmethod
     def from_batched(batchtensor, has_device):
         tensor, levels = _remove_batch_dims(batchtensor)
@@ -714,7 +701,6 @@ def __getitem__(self, input):
         flat_inputs[i] = _match_levels(flat_inputs[i], levels, index_levels)
 
     if requires_getindex:
-        print(ptensor_self, flat_inputs)
         result = _orig_getitem(ptensor_self, flat_inputs)
     else:
         result = ptensor_self

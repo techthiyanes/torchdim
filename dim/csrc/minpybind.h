@@ -162,6 +162,9 @@ bool isinstance(handle h, handle c) {
 template<typename T>
 struct base {
     PyObject_HEAD
+    PyObject* ptr() const {
+        return (PyObject*) this;
+    }
     static obj<T> alloc(PyTypeObject* type = nullptr) {
         if (!type) {
             type = &T::Type;
@@ -357,3 +360,20 @@ bool is_slice(handle h) {
 
 }
 
+#define MPY_ARGS_NAME(typ, name) #name ,
+#define MPY_ARGS_DECLARE(typ, name) typ name;
+#define MPY_ARGS_POINTER(typ, name) &name ,
+#define MPY_PARSE_ARGS_KWARGS(fmt, FORALL_ARGS) \
+    static char* kwlist[] = { FORALL_ARGS(MPY_ARGS_NAME) nullptr}; \
+    FORALL_ARGS(MPY_ARGS_DECLARE) \
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, fmt, kwlist, FORALL_ARGS(MPY_ARGS_POINTER) nullptr)) { \
+        throw py::exception_set(); \
+    }
+
+#define MPY_PARSE_ARGS_KWNAMES(fmt, FORALL_ARGS) \
+    static const char * const kwlist[] = { FORALL_ARGS(MPY_ARGS_NAME) nullptr}; \
+    FORALL_ARGS(MPY_ARGS_DECLARE) \
+    static _PyArg_Parser parser = {fmt, kwlist, 0}; \
+    if (!_PyArg_ParseStackAndKeywords(args, nargs, kwnames, &parser, FORALL_ARGS(MPY_ARGS_POINTER nullptr))) { \
+        throw py::exception_set(); \
+    }

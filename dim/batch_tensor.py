@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from weakref import WeakValueDictionary
 
 from functorch._C import (
     _add_batch_dim,
@@ -11,13 +10,11 @@ from functorch._C import (
     current_level,
 )
 
+from dim._C import _level_to_dim
+
 from contextlib import contextmanager
 import functorch
 
-
-_levels = []
-# in C this can just be a raw array without refcounting
-_level_to_dim = WeakValueDictionary()
 
 _enabled = False
 @contextmanager
@@ -54,20 +51,6 @@ def _remove_batch_dims(t):
         if l == -1:
             break
         d = maybe_get_bdim(t)
-        levels.insert(d, _level_to_dim[l])
+        levels.insert(d, _level_to_dim(l))
         t = get_unwrapped(t)
     return t, levels
-
-
-
-def _alloc_level(dim):
-    assert len(_levels) <= 32
-    dim._level = 31 + len(_levels)
-    _level_to_dim[dim._level] = dim
-    _levels.append(True)
-
-def _free_level(dim):
-    idx = dim._level - 31
-    _levels[idx] = False
-    while _levels and not _levels[-1]:
-        _levels.pop()

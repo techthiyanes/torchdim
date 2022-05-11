@@ -9,9 +9,8 @@ import torch
 import gc
 import refcycle
 
-from dim.batch_tensor import _levels
 
-from dim._C import _test_c
+from dim._C import _test_c, _n_levels_in_use
 
 
 def triu(A):
@@ -28,11 +27,11 @@ class TestMin(TestCase):
         gc.collect()
 
     def tearDown(self):
-        nolevels = len(_levels) == 0
+        nolevels = _n_levels_in_use() == 0
         if not nolevels:
             refcycle.garbage().export_image('garbage.png')
         gc.collect()
-        assert nolevels, f"cleanup failed? {len(_levels)}"
+        assert nolevels, f"cleanup failed? {_n_levels_in_use()}"
 
     def test_manual_stuff(self):
 
