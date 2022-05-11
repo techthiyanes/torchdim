@@ -28,6 +28,10 @@ class _Tensor:
     def ndim(self):
         return self._batchtensor.ndim
 
+    @property
+    def dims(self):
+        return tuple(d for d in self._levels if isinstance(d, Dim))
+
     @classmethod
     def __torch_function__(self, orig, cls, args, kwargs={}):
         #print("BEGIN", orig)
@@ -55,13 +59,12 @@ class _Tensor:
             return t
 
         if orig in pointwise:
-            levels_to_dim = {d.level: d for d in all_dims}
             result_levels = []
             arg_levels = []
             to_expand = []
             for i,f in enumerate(flat_args):
                 if isinstance(f, TensorLike):
-                    ptensor, levels = _maybe_remove_batch_dims(f, levels_to_dim)
+                    ptensor, levels, _ = _tensor_levels(f)
                     if isinstance(f, _Tensor) and not f._has_device and device_holding_tensor is not None:
                         ptensor = ptensor.to(device=device_holding_tensor.device)
                     flat_args[i] = ptensor
@@ -74,16 +77,15 @@ class _Tensor:
                 flat_args[i] = _match_levels(flat_args[i], levels, result_levels)
             args, kwargs = unflatten(flat_args)
             result = orig(*args, **kwargs)
-            result_levels = [r.level if isinstance(r, Dim) else 0 for r in result_levels]
             def wrap(t):
                 if isinstance(t, TensorLike):
-                    return Tensor(_add_batch_dims(t, result_levels), tuple(all_dims), device_holding_tensor is not None)
+                    return Tensor.from_positional(t, result_levels, device_holding_tensor is not None)
                 return t
             return tree_map(wrap, result)
         else:
             def wrap(t):
                 if isinstance(t, TensorLike):
-                    return Tensor(t, tuple(all_dims), device_holding_tensor is not None)
+                    return Tensor.from_batched(t, device_holding_tensor is not None)
                 return t
             with _enable_layers(all_dims):
                 print(f"batch_tensor for {orig}")
@@ -93,16 +95,11 @@ class _Tensor:
                 return tree_map(wrap, result)
 
     def __repr__(self):
-        ptensor, levels = _remove_batch_dims(self._batchtensor)
-        for d in self.dims:
-            levels[levels.index(d.level)] = d
-        return f'{ptensor}\nwith dims={levels} {ptensor.size()}'
-    def _tensor_like(batchtensor):
-        return Tensor(batchtensor, self.dims, self._has_device)
+        tensor, levels = self._tensor, self._levels
+        return f'{tensor}\nwith dims={levels} {tensor.size()}'
 
     def positional(self, *dims):
-        ptensor, levels = _remove_batch_dims(self._batchtensor)
-
+        ptensor, levels = self._tensor, list(self._levels)
         flat_dims = []
         view = []
         needs_view = False
@@ -119,21 +116,20 @@ class _Tensor:
                 needs_view = True
 
         permute = list(range(len(levels)))
+        ndim = self.ndim
+        nflat = len(flat_dims)
         for i, d in enumerate(flat_dims):
             try:
-                idx = levels.index(d.level)
+                idx = levels.index(d)
             except ValueError as e:
-                print(d.level)
-                print(levels)
                 raise DimensionBindError(f'tensor of dimensions {self.dims} does not contain dim {d}') from e
             p = permute[idx]
             del levels[idx]
             del permute[idx]
-            levels.insert(i, i)
+            levels.insert(i, -ndim - (nflat - i))
             permute.insert(i, p)
         ptensor = ptensor.permute(*permute)
-        new_dims = tuple(d for d in self.dims if d not in flat_dims)
-        result = Tensor.create(_add_batch_dims(ptensor, levels), new_dims, self._has_device)
+        result = Tensor.from_positional(ptensor, levels, self._has_device)
         if needs_view:
             result = result.reshape(*view, *result.size()[len(flat_dims):])
         return result
@@ -142,9 +138,9 @@ class _Tensor:
     # used to do multi-tensor operators where the dim being acted on
     # should not physically move if possible
     def _positional_no_permute(self, dim, expand_dim=False):
-        ptensor, levels = _remove_batch_dims(self._batchtensor)
+        ptensor, levels = self._tensor, list(self._levels)
         try:
-            idx = levels.index(dim.level)
+            idx = levels.index(dim)
         except ValueError:
             if not expand_dim:
                 raise
@@ -153,30 +149,11 @@ class _Tensor:
             levels.insert(0, 0)
         idx_batched = 0
         for i in range(idx):
-            if levels[i] >= 0:
+            if isinstance(levels[i], int):
+                levels[i] -= 1
                 idx_batched += 1
-        levels[idx] = 0
-        return Tensor.create(_add_batch_dims(ptensor, levels), tuple(d for d in self.dims if d != dim), self._has_device), idx_batched
-
-    def at(self, *indices):
-        raise NotImplementedError()
-
-    def at_idx(self, idx, d, rest):
-        raise NotImplementedError()
-        if idx < 0:
-            idx += len(self._positional)
-        rest.bind_len(len(self._positional) - 1)
-        to_reshape = list(rest)
-        to_reshape.insert(idx, d)
-        return self.data.reshape(self._positional, to_reshape)
-
-    def positional_idx(self, idx, dim, rest):
-        raise NotImplementedError()
-        if idx < 0:
-            idx += len(rest) + 1
-        new_positional = list(rest)
-        new_positional.insert(idx, dim)
-        return Tensor(self.data, self._positional + tuple(new_positional))
+        levels[idx] = -idx_batched - 1
+        return Tensor.from_positional(ptensor, levels, self._has_device), idx_batched
 
     # ops that should also just take dims as arguments
     # reductions - important ones implemented (for the dim argument)
@@ -192,7 +169,6 @@ class _Tensor:
         sizes = [d.size for d in dims] + [-1]*self.ndim
         self = self.expand(*sizes)
         return self[dims]
-
 
     def gather(self, dims, values):
         if isinstance(dims, int):
@@ -214,28 +190,26 @@ class _Tensor:
         _bind_one_dim(f, t)
         if f not in self.dims:
             raise DimensionMismatchError(f"tensor ({self.dims}) does not have dim: {f}")
-        ptensor, levels = _remove_batch_dims(self._batchtensor)
-        f_idx = levels.index(f.level)
+        ptensor, levels = self._tensor, list(self._levels)
+        f_idx = levels.index(f)
         new_sizes = list(ptensor.size())
-        levels[f_idx:f_idx+1] = [e.level for e in t]
+        levels[f_idx:f_idx+1] = t
         new_sizes[f_idx:f_idx+1] = [e.size for e in t]
 
-        new_dims = (*(d for d in self.dims if d is not f), *t)
-        return Tensor(_add_batch_dims(ptensor.view(*new_sizes), levels), new_dims, self._has_device)
+        return Tensor.from_positional(ptensor.view(*new_sizes), levels, self._has_device)
 
     def _flatten(self, f: 'Sequence[Dim]', t: 'Dim'):
         _bind_one_dim(t, f)
-        ptensor, levels = _remove_batch_dims(self._batchtensor)
-        indices = tuple(levels.index(e.level) for e in f)
+        ptensor, levels = self._tensor, list(self._levels)
+        indices = tuple(levels.index(e) for e in f)
         start_idx = min(indices)
         end_idx = start_idx + len(indices)
         ptensor = ptensor.movedim(indices, tuple(range(start_idx, end_idx)))
         ptensor = ptensor.flatten(start_idx, end_idx - 1)
         for idx in sorted(indices, reverse=True):
             del levels[idx]
-        levels.insert(start_idx, t.level)
-        new_dims = (t, *(d for d in self.dims if d not in f))
-        return Tensor(_add_batch_dims(ptensor, levels), new_dims, self._has_device)
+        levels.insert(start_idx, t)
+        return Tensor.from_positional(ptensor, levels, self._has_device)
 
     def reshape_dim(self, f: 'Union[Dim, Sequence[Dim]]', t: 'Union[Dim, Sequence[Dim]]'):
         if not isinstance(f, Dim):
@@ -295,27 +269,25 @@ def _wrap(orig, dim_offset=0, keepdim_offset=1, dim_name='dim', single_dim=False
         if dim is _not_present or (single_dim and not isinstance(dim, Dim)):
             with _enable_layers(self.dims):
                 print(f"dim fallback batch_tensor for {orig}")
-                return self._tensor_like(orig(self._batchtensor, *args, **kwargs))
+                return Tensor.from_batched(orig(self._batchtensor, *args, **kwargs), self._has_device)
         keepdim = _getarg('keepdim', keepdim_offset, args, kwargs, False) if reduce else False
-        t, levels = _remove_batch_dims(self._batchtensor)
+        t, levels = self._tensor, list(self._levels)
         dims = _dims(dim, self._batchtensor.ndim, keepdim, single_dim)
-
-        dim_indices = tuple(levels.index(d if isinstance(d, int) else d.level) for d in dims)
-        if reduce:
+        dim_indices = tuple(levels.index(d) for d in dims)
+        if reduce and not keepdim:
             new_levels = [l for i, l in enumerate(levels) if i not in dim_indices]
-            new_dims = tuple(d for d in self.dims if d.level in new_levels)
         else:
             new_levels = levels
-            new_dims = self.dims
+
         if len(dim_indices) == 1:
             dim_indices = dim_indices[0] # so that dims that really only take a single argument work...
         args = list(args)
         _patcharg(dim_name, dim_offset, args, kwargs, dim_indices)
         def wrap(t):
             if isinstance(t, TensorLike):
-                return Tensor.create(_add_batch_dims(t, new_levels), new_dims, self._has_device)
+                return Tensor.from_positional(t, new_levels, self._has_device)
             return t
-        with _enable_layers(new_dims):
+        with _enable_layers(new_levels):
             print(f"dim used batch_tensor for {orig}")
             r = orig(t, *args, **kwargs)
             return tree_map(wrap, r)
@@ -393,13 +365,15 @@ softmax = _wrap(torch.nn.functional.softmax, single_dim=True, reduce=False)
 class Dim(_C.Dim, _Tensor):
     def __init__(self, name: str, size: Union[None, int]=None):
         super().__init__(name, size)
-        self.level = _alloc_level()
+        _alloc_level(self)
 
+    def __format__(self, format_spec):
+        return str(self)
 
     __hash__ = object.__hash__
 
     def __del__(self):
-        _free_level(self.level)
+        _free_level(self)
 
     def __eq__(self, o):
         if not isinstance(o, Dim) and isinstance(o, TensorLike):
@@ -416,7 +390,7 @@ class Dim(_C.Dim, _Tensor):
         r = getattr(self, '_batchtensor_cached', None)
         if r is not None:
             return r
-        r = self._batchtensor_cached = _add_batch_dims(torch.arange(self.size), (self.level,))
+        r = self._batchtensor_cached = _add_batch_dims(self._tensor, self._levels)
         return r
 
     @property
@@ -424,8 +398,17 @@ class Dim(_C.Dim, _Tensor):
         return False
 
     @property
-    def dims(self):
+    def _levels(self):
         return (self,)
+
+    @property
+    def _tensor(self):
+        r = getattr(self, '_tensor_cached', None)
+        if r is not None:
+            return r
+        r = self._tensor_cached = torch.arange(self.size)
+        return r
+
 
 class DimList:
     def __init__(self, len_or_dims: Union[None, int, 'Sequence[Dim]'] = None, name = None):
@@ -465,7 +448,7 @@ class DimList:
     def __repr__(self):
         if self.dims is not None:
             return repr(self.dims)
-        elif name is not None:
+        elif self.name is not None:
             return '*' + self.name
         else:
             return "<unbound_dimlist>"
@@ -525,20 +508,34 @@ def dims(lists=0):
 
 
 class Tensor(_Tensor):
-    def __init__(self, batchtensor, dims, has_device):
-        assert isinstance(batchtensor, TensorLike)
+    def __init__(self, tensor, levels, has_device, batchtensor):
+        assert isinstance(batchtensor, torch.Tensor)
         assert not isinstance(batchtensor, _Tensor)
-        assert isinstance(dims, tuple)
-        assert len(dims) >= 1 # otherwise this should just be a normal tensor
+        assert isinstance(levels, tuple)
+        assert any(isinstance(d, Dim) for d in levels)
+        self._tensor = tensor
+        self._levels = levels
         self._batchtensor = batchtensor
         self._has_device = has_device
-        self.dims = dims
 
     @staticmethod
-    def create(batchtensor, dims, has_device):
-        if not dims:
-            return batchtensor
-        return Tensor(batchtensor, dims, has_device)
+    def from_batched(batchtensor, has_device):
+        tensor, levels = _remove_batch_dims(batchtensor)
+        return Tensor(tensor, tuple(levels), has_device, batchtensor)
+
+    @staticmethod
+    def from_positional(ptensor, levels, has_device):
+        if not any(isinstance(d, Dim) for d in levels):
+            return ptensor
+        # sanity check the levels array since it is created in many different places
+        last = None
+        for l in levels:
+            if isinstance(l, int):
+                assert last is None or last + 1 == l
+        assert last is None or last == -1
+        assert len(levels) == ptensor.ndim
+        batchtensor = _add_batch_dims(ptensor, levels)
+        return Tensor(ptensor, tuple(levels), has_device, batchtensor)
 
 class DelayedMulTensor(Tensor):
     def __init__(self, lhs, rhs):
@@ -568,16 +565,16 @@ class DelayedMulTensor(Tensor):
     def sum(self, dim):
         dims = _dims(dim, 0, False, False)
         n = ord('a')
-        all_levels = [d.level for d in self.dims]
+        all_levels = self._levels
         def to_char(d):
             return chr(n + all_levels.index(d))
-        plhs, levelslhs = _remove_batch_dims(self._lhs._batchtensor)
-        prhs, levelsrhs = _remove_batch_dims(self._rhs._batchtensor)
+        plhs, levelslhs = self._lhs._tensor, self._lhs._levels
+        prhs, levelsrhs = self._rhs._tensor, self._rhs._levels
         new_dims = tuple(d for d in self.dims if d not in dims)
-        new_levels = list(d.level for d in new_dims)
+        new_levels = [l for l in self._levels if l not in dims]
         fmt = ''.join([*(to_char(d) for d in levelslhs), ',', *(to_char(d) for d in levelsrhs), '->', *(to_char(d) for d in new_levels)])
         result_data = torch.einsum(fmt, (plhs, prhs))
-        return Tensor(_add_batch_dims(result_data, new_levels), new_dims, True)
+        return Tensor.from_positional(result_data, new_levels, True)
 
 
 
@@ -585,23 +582,16 @@ def _wrap_dim(d, N, keepdim):
     if isinstance(d, Dim):
         assert not keepdim, "cannot preserve first-class dimensions with keepdim=True"
         return d
-    elif d < 0:
-        return N + d
+    elif d >= 0:
+        return d - N
     else:
         return d
 
-def _maybe_remove_batch_dims(inp, levels_to_dim):
+def _tensor_levels(inp):
     if isinstance(inp, _Tensor):
-        ndim = inp.ndim
-        ptensor, levels = _remove_batch_dims(inp._batchtensor)
-        for i,l in enumerate(levels):
-            if l < 0:
-                levels[i] = levels_to_dim[l]
-            else:
-                levels[i] = l - ndim
-        return ptensor, levels
+        return inp._tensor, list(inp._levels), inp._has_device
     else:
-        return inp, list(range(-1, -(inp.ndim + 1), -1))
+        return inp, list(range(-inp.ndim, 0)), True
 
 def _match_levels(v, from_levels, to_levels):
     view = []
@@ -635,17 +625,24 @@ def _contains_dim(input):
             return True
 
 def _bind(self, offset, dims):
-    if isinstance(self, _Tensor):
-        ptensor, levels = _remove_batch_dims(self._batchtensor)
-        has_device, old_dims = self._has_device, self.dims
-    else:
-        ptensor, levels, has_device, old_dims = self, list(range(self.ndim)), True, ()
-    sz = ptensor.size()
-    for o, d in zip(offset, dims):
-        idx = levels.index(o)
-        d.size = sz[idx]
-        levels[idx] = d.level
-    return Tensor.create(_add_batch_dims(ptensor, levels), (*old_dims, *dims), has_device)
+    ptensor, levels, has_device = _tensor_levels(self)
+    next_idx = 0
+    for i, (l, sz) in enumerate(zip(levels, ptensor.size())):
+        if isinstance(l, int):
+            try:
+                idx =offset.index(next_idx)
+                d = levels[i] = dims[idx]
+                d.size = sz
+            except ValueError:
+                pass
+            next_idx += 1
+
+    next_non_dim = -1
+    for i in range(len(levels) - 1, -1, -1):
+        if isinstance(levels[i], int):
+            levels[i] = next_non_dim
+            next_non_dim -= 1
+    return Tensor.from_positional(ptensor, levels, has_device)
 
 no_slice = slice(None)
 def __getitem__(self, input):
@@ -754,16 +751,16 @@ def __getitem__(self, input):
     # figure out the dimensions of the indexing tensors: union of all the dims in the tensors in the index.
     # these dimensions will appear and need to be bound at the first place tensor occures
 
-    levels_to_dim = {d.level: d for d in dims_seen.keys()}
-
     if isinstance(self, _Tensor):
-        ptensor_self, levels = _remove_batch_dims(self._batchtensor)
+        ptensor_self, levels = self._tensor, list(self._levels)
         # indices to ptensor rather than self which has first-class dimensions
         input_it = iter(input)
-        flat_inputs = [next(input_it) if l >= 0 else levels_to_dim[l] for l in levels]
+        flat_inputs = [next(input_it) if isinstance(l, int) else l for l in levels]
         has_device = self._has_device
+        to_pad = 0
     else:
         ptensor_self, flat_inputs = self, input
+        to_pad = ptensor_self.ndim - len(flat_inputs)
         has_device = True
 
     result_levels = []
@@ -779,7 +776,7 @@ def __getitem__(self, input):
             requires_getindex = True
             if tensor_insert_point is None:
                 tensor_insert_point = len(result_levels)
-            ptensor, levels = _maybe_remove_batch_dims(inp, levels_to_dim)
+            ptensor, levels, _ = _tensor_levels(inp)
             to_expand[i] = levels
             flat_inputs[i] = ptensor
             for l in levels:
@@ -800,14 +797,15 @@ def __getitem__(self, input):
     else:
         result = ptensor_self
 
-    dims = []
-    for i, r in enumerate(result_levels):
-        if isinstance(r, Dim):
-            dims.append(r)
-            result_levels[i] = r.level
-        else:
-            result_levels[i] = 0
-    return Tensor.create(_add_batch_dims(result, result_levels), tuple(dims), has_device)
+    next_positional = -1
+    if to_pad > 0:
+        result_levels.extend([0]*to_pad)
+    for i, r in enumerate(reversed(result_levels)):
+        if isinstance(r, int):
+            result_levels[-1 - i] = next_positional
+            next_positional -= 1
+
+    return Tensor.from_positional(result, result_levels, has_device)
 
 
 torch.Tensor.__getitem__ = __getitem__
