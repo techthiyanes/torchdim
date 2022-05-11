@@ -7,6 +7,7 @@ from .tree_map import tree_flatten, tree_map
 from collections import defaultdict
 from .wrap_type import wrap_type
 import dim._C as _C
+from dim._C import dims, DimList
 
 class DimensionMismatchError(Exception):
     pass
@@ -363,10 +364,6 @@ softmax = _wrap(torch.nn.functional.softmax, single_dim=True, reduce=False)
 
 
 class Dim(_C.Dim, _Tensor):
-    def __init__(self, name: str, size: Union[None, int]=None):
-        super().__init__(name, size)
-        _alloc_level(self)
-
     def __format__(self, format_spec):
         return str(self)
 
@@ -409,50 +406,6 @@ class Dim(_C.Dim, _Tensor):
         r = self._tensor_cached = torch.arange(self.size)
         return r
 
-
-class DimList:
-    def __init__(self, len_or_dims: Union[None, int, 'Sequence[Dim]'] = None, name = None):
-        self.name = name
-        self.dims = None
-        if isinstance(len_or_dims, int):
-            self.bind_len(len_or_dims)
-        elif len_or_dims is None:
-            self.dims = None
-        else:
-            self.dims = [ Dim(f"{self.name}{i}", d) if not isinstance(d, Dim) else d for i,d in enumerate(len_or_dims) ]
-
-    def bind_len(self, N:int):
-        if self.dims is None:
-            self.dims = [Dim(f"{self.name}{i}") for i in range(N)]
-        elif len(self.dims) != N:
-            raise DimensionBindError(f"DimList has size {len(self.dims)} but it is being bound to size {N}")
-
-    @property
-    def is_bound(self):
-        return self.dims is not None
-
-    def bind(self, sizes: Sequence[int]):
-        self.bind_len(len(sizes))
-        for d, s in zip(self.dims, sizes):
-            d.size = s
-
-    def __iter__(self):
-        return iter(self.dims)
-
-    def __len__(self):
-        return len(self.dims)
-
-    def __getitem__(self, idx):
-        return self.dims[idx]
-
-    def __repr__(self):
-        if self.dims is not None:
-            return repr(self.dims)
-        elif self.name is not None:
-            return '*' + self.name
-        else:
-            return "<unbound_dimlist>"
-
 def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
     not_bound = tuple((i, r) for i, r in enumerate(rhs) if not r.is_bound)
     if len(not_bound) == 1:
@@ -474,38 +427,6 @@ def _bind_one_dim(lhs: 'Dim', rhs: 'Sequence[Dim]'):
         lhs.size = prod(r.size for r in rhs)
     else:
         _bind_dims_to_size(lhs.size, rhs, lhs)
-
-def extract_name(inst):
-    assert inst.opname == 'STORE_FAST' or inst.opname == 'STORE_NAME'
-    return inst.argval
-
-_cache = {}
-def dims(lists=0):
-    frame = inspect.currentframe()
-    assert frame is not None
-    calling_frame = frame.f_back
-    assert calling_frame is not None
-    code, lasti = calling_frame.f_code, calling_frame.f_lasti
-    key = (code, lasti)
-    if key not in _cache:
-        first = lasti // 2 + 1
-        instructions = list(dis.get_instructions(calling_frame.f_code))
-        unpack = instructions[first]
-
-        if unpack.opname == 'STORE_FAST' or unpack.opname == 'STORE_NAME':
-            # just a single dim, not a list
-            name = unpack.argval
-            ctor = Dim if lists == 0 else DimList
-            _cache[key] = lambda: ctor(name=name)
-        else:
-            assert unpack.opname == 'UNPACK_SEQUENCE'
-            ndims = unpack.argval
-            names = tuple(extract_name(instructions[first + 1 + i]) for i in range(ndims))
-            first_list = len(names) - lists
-            _cache[key] = lambda: tuple(Dim(n) if i < first_list else DimList(name=n) for i, n in enumerate(names))
-    del frame
-    return _cache[key]()
-
 
 class Tensor(_Tensor):
     def __init__(self, tensor, levels, has_device, batchtensor):
@@ -793,6 +714,7 @@ def __getitem__(self, input):
         flat_inputs[i] = _match_levels(flat_inputs[i], levels, index_levels)
 
     if requires_getindex:
+        print(ptensor_self, flat_inputs)
         result = _orig_getitem(ptensor_self, flat_inputs)
     else:
         result = ptensor_self

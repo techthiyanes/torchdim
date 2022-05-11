@@ -25,11 +25,14 @@ static int g_creation_order_ = 0;
 py::handle DimensionBindError_;
 static py::handle DimensionBindError() {
     if(!DimensionBindError_.ptr()) {
-        DimensionBindError_ = py::import("mintorch").attr("DimensionBindError");
+        DimensionBindError_ = py::import("dim").attr("DimensionBindError");
     }
     return DimensionBindError_;
 }
 
+
+PyTypeObject* DimType = nullptr;
+py::handle _alloc_level;
 struct Dim : public py::base<Dim> {
     int creation_order_; // for stable comparisons in prototype
     py::object name_;
@@ -54,6 +57,16 @@ struct Dim : public py::base<Dim> {
     }
     bool is_bound() const {
         return size_ != -1;
+    }
+    static py::obj<Dim> create(py::object name, int64_t s = -1) {
+        if (!DimType) {
+            DimType = (PyTypeObject*) py::import("dim").attr("Dim").ptr();
+            _alloc_level = py::import("dim.batch_tensor").attr("_alloc_level");
+        }
+        auto r = Dim::alloc(DimType);
+        r->init(std::move(name), s);
+        _alloc_level.call(r);
+        return r;
     }
     static PyTypeObject Type;
 private:
@@ -276,15 +289,15 @@ const char* rich_comparison_table[] {
     "__ge__"
 };
 
-static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op) {
-    PY_BEGIN
-        if (Py_TYPE(other) == &Dim::Type && (op == Py_EQ || op == Py_NE))  {
-            Py_RETURN_RICHCOMPARE( (void*)self, (void*) other, op);
-        } else {
-            return Tensor_richcompare((PyObject*)self, other, op);
-        }
-    PY_END(nullptr)
-}
+// static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op) {
+//     PY_BEGIN
+//         if (Py_TYPE(other) == &Dim::Type && (op == Py_EQ || op == Py_NE))  {
+//             Py_RETURN_RICHCOMPARE( (void*)self, (void*) other, op);
+//         } else {
+//             return Tensor_richcompare((PyObject*)self, other, op);
+//         }
+//     PY_END(nullptr)
+// }
 
 // class DimList ------------
 
@@ -585,7 +598,7 @@ public:
     }
     static py::obj<Tensor> create_subclass(std::vector<py::obj<Dim>> dims, at::Tensor data, bool is_any_dims) {
         if (!TensorType) {
-            TensorType = (PyTypeObject*) py::import("mintorch").attr("Tensor").ptr();
+            TensorType = (PyTypeObject*) py::import("dim").attr("Tensor").ptr();
         }
         auto r = Tensor::alloc(TensorType);
         r->init(std::move(dims), std::move(data), is_any_dims);
