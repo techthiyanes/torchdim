@@ -35,8 +35,7 @@ class _Tensor:
 
     @classmethod
     def __torch_function__(self, orig, cls, args, kwargs={}):
-        #print("BEGIN", orig)
-        if orig is torch.Tensor.mul:
+        if orig is torch.Tensor.__mul__:
             lhs, rhs = args
             if isinstance(lhs, _Tensor) and isinstance(rhs, _Tensor) and lhs.ndim == 0 and rhs.ndim == 0:
                 #print("END", orig)
@@ -429,30 +428,34 @@ class Tensor(_Tensor, _C.Tensor):
     from_batched = staticmethod(_C.Tensor_from_batched)
     from_positional = staticmethod(_C.Tensor_from_positional)
 
-class DelayedMulTensor(Tensor):
+class DelayedMulTensor(_Tensor):
     def __init__(self, lhs, rhs):
         self._lhs, self._rhs = lhs, rhs
-        self._batchtensor_data = None
-        self._dims = None
+        self._data = None
+        self._levels_data = None
         self._has_device = lhs._has_device or rhs._has_device
 
     @property
-    def dims(self):
-        if self._dims is None:
-            dims = list(self._lhs.dims)
-            for d in self._rhs.dims:
-                if d not in dims:
-                    dims.append(d)
-            self._dims = tuple(dims)
-        return self._dims
+    def _levels(self):
+        if self._levels_data is None:
+            levels = list(self._lhs._levels)
+            for l in self._rhs._levels:
+                if l not in levels:
+                    levels.append(l)
+            self._levels_data = tuple(levels)
+        return self._levels_data
 
     @property
     def _batchtensor(self):
         if self._batchtensor_data is None:
-            with _enable_layers(self.dims):
+            with _enable_layers(self._levels):
                 print(f"bt multiply fallback")
                 self._batchtensor_data = self._lhs._batchtensor * self._rhs._batchtensor
         return self._batchtensor_data
+
+    @property
+    def _tensor(self):
+        raise NotImplementedError()
 
     def sum(self, dim):
         dims = _dims(dim, 0, False, False)

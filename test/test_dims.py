@@ -226,6 +226,13 @@ class TestMin(TestCase):
         z = x[i, j]
         print(z + z + z + z)
 
+    def test_mm_fuse(self):
+        i, j, k = dims()
+        A = torch.rand(3, 4)
+        B = torch.rand(4, 5)
+        C = (A[i, k] * B[k, j]).sum(k).positional(i, j)
+        assert torch.allclose(C, A @ B)
+
     def test_c(self):
         _test_c()
 
