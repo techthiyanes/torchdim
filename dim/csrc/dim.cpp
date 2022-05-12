@@ -222,6 +222,8 @@ static PyGetSetDef Dim_getsetters[] = {
     {NULL}  /* Sentinel */
 };
 
+static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op);
+
 PyTypeObject Dim::Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "_C.Dim",               /* tp_name */
@@ -246,7 +248,7 @@ PyTypeObject Dim::Type = {
     "Dim Object",                   /* tp_doc */
     0,                              /* tp_traverse */
     0,                              /* tp_clear */
-    0,  /* tp_richcompare */
+    (richcmpfunc) Dim_richcompare,  /* tp_richcompare */
     0,                              /* tp_weaklistoffset */
     0,                              /* tp_iter */
     0,                              /* tp_iternext */
@@ -265,7 +267,7 @@ PyTypeObject Dim::Type = {
 
 
 py::handle rich_comparison_fns[6];
-const char* rich_comparison_table[] {
+const char* rich_comparison_table[] = {
     "__lt__",
     "__le__",
     "__eq__",
@@ -274,15 +276,21 @@ const char* rich_comparison_table[] {
     "__ge__"
 };
 
-// static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op) {
-//     PY_BEGIN
-//         if (Py_TYPE(other) == &Dim::Type && (op == Py_EQ || op == Py_NE))  {
-//             Py_RETURN_RICHCOMPARE( (void*)self, (void*) other, op);
-//         } else {
-//             return Tensor_richcompare((PyObject*)self, other, op);
-//         }
-//     PY_END(nullptr)
-// }
+static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op) {
+    PY_BEGIN
+        if (op == Py_EQ || op == Py_NE)  {
+            Py_RETURN_RICHCOMPARE( (void*)self, (void*) other, op);
+        } else {
+            if (!rich_comparison_fns[0].ptr()) {
+                for (auto i : c10::irange(6)) {
+                    auto r = py::import("dim").attr("_Tensor");
+                    rich_comparison_fns[i] = r.attr(rich_comparison_table[i]);
+                }
+            }
+            return rich_comparison_fns[op].call(py::handle(self->ptr()), py::handle(other)).release();
+        }
+    PY_END(nullptr)
+}
 
 // class DimList ------------
 
@@ -490,7 +498,7 @@ PyTypeObject DimList::Type = {
     "DimList Object",                   /* tp_doc */
     0,                              /* tp_traverse */
     0,                              /* tp_clear */
-    0,  /* tp_richcompare */
+    0,                              /* tp_richcompare */
     0,                              /* tp_weaklistoffset */
     0,                              /* tp_iter */
     0,                              /* tp_iternext */

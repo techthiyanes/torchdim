@@ -233,6 +233,12 @@ class TestMin(TestCase):
         C = (A[i, k] * B[k, j]).sum(k).positional(i, j)
         assert torch.allclose(C, A @ B)
 
+    def test_compare_dims(self):
+        i, j = dims()
+        i.size = 3
+        j.size = 4
+        print(i < j)
+
     def test_c(self):
         _test_c()
 

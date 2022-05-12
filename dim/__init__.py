@@ -363,20 +363,11 @@ softmax = _wrap(torch.nn.functional.softmax, single_dim=True, reduce=False)
 
 
 class Dim(_C.Dim, _Tensor):
-    def __format__(self, format_spec):
-        return str(self)
-
+    # Tensor defines these methods for actual tensor data
+    # we want dims to behave like individual objects for
+    # hashing and printing, so we revert back to the object implementation
+    __format__ = object.__format__
     __hash__ = object.__hash__
-
-    def __eq__(self, o):
-        if not isinstance(o, Dim) and isinstance(o, TensorLike):
-            return torch.Tensor.__eq__(self, o)
-        return object.__eq__(self, o)
-
-    def __ne__(self, o):
-        if not isinstance(o, Dim) and isinstance(o, TensorLike):
-            return torch.Tensor.__ne__(self, o)
-        return object.__ne__(self, o)
 
 def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
     not_bound = tuple((i, r) for i, r in enumerate(rhs) if not r.is_bound)

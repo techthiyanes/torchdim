@@ -172,6 +172,7 @@ struct Arena {
         AT_ASSERT(allocated_ <= ARENA_MAX_SIZE);
         return result;
     }
+#if 0
     at::Tensor* autorelease(at::Tensor s) {
         ar_tensors_ = ar_tensors_.append(*this, std::move(s));
         return &ar_tensors_.back();
@@ -180,19 +181,24 @@ struct Arena {
         ar_objects_ = ar_objects_.append(*this, std::move(obj));
         return ar_objects_.back();
     }
+#endif
     ~Arena() {
+#if 0
         for(at::Tensor& t: ar_tensors_) {
             delete &t;
         }
         for(py::object& o: ar_objects_) {
             delete &o;
         }
+#endif
     }
 private:
     int64_t allocated_;
     char buffer_[ARENA_MAX_SIZE];
+#if 0
     Slice<at::Tensor> ar_tensors_;
     Slice<py::object> ar_objects_;
+#endif
 };
 
 template<typename T>
