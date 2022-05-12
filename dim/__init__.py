@@ -431,19 +431,7 @@ class Tensor(_Tensor, _C.Tensor):
         tensor, levels = _remove_batch_dims(batchtensor)
         return Tensor(tensor, tuple(levels), has_device, batchtensor)
 
-    @staticmethod
-    def from_positional(ptensor, levels, has_device):
-        if not any(isinstance(d, Dim) for d in levels):
-            return ptensor
-        # sanity check the levels array since it is created in many different places
-        last = None
-        for l in levels:
-            if isinstance(l, int):
-                assert last is None or last + 1 == l
-        assert last is None or last == -1
-        assert len(levels) == ptensor.ndim
-        batchtensor = _add_batch_dims(ptensor, levels)
-        return Tensor(ptensor, tuple(levels), has_device, batchtensor)
+    from_positional = staticmethod(_C.Tensor_from_positional)
 
 class DelayedMulTensor(Tensor):
     def __init__(self, lhs, rhs):

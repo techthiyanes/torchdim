@@ -372,6 +372,6 @@ bool is_slice(handle h) {
     static const char * const kwlist[] = { FORALL_ARGS(MPY_ARGS_NAME) nullptr}; \
     FORALL_ARGS(MPY_ARGS_DECLARE) \
     static _PyArg_Parser parser = {fmt, kwlist, 0}; \
-    if (!_PyArg_ParseStackAndKeywords(args, nargs, kwnames, &parser, FORALL_ARGS(MPY_ARGS_POINTER nullptr))) { \
+    if (!_PyArg_ParseStackAndKeywords(args, nargs, kwnames, &parser, FORALL_ARGS(MPY_ARGS_POINTER) nullptr)) { \
         throw py::exception_set(); \
     }

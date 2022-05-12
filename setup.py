@@ -1,6 +1,7 @@
 from setuptools import setup
 import os.path
-
+import functorch._C
+import os.path
 from torch.utils.cpp_extension import (
       CppExtension,
       BuildExtension
@@ -14,7 +15,8 @@ mintorch_C = CppExtension(
       'dim._C',
       srcs,
       include_dirs = [os.path.dirname(os.path.abspath(__file__))],
-      extra_compile_args = { "cxx": ["-Wno-write-strings", "-Wno-sign-compare"] }
+      extra_compile_args = { "cxx": ["-Wno-write-strings", "-Wno-sign-compare"] },
+      extra_link_args = [functorch._C.__file__]
 )
 
 setup(name='dim',

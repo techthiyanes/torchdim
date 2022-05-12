@@ -18,7 +18,11 @@
 // * object/handle distinction for the typed handles
 
 // class Dim: ---------------
-
+namespace at {
+namespace functorch {
+    at::Tensor _add_batch_dim(const at::Tensor& self, int64_t batch_dim, int64_t level);
+}
+}
 
 py::handle DimensionBindError_;
 static py::handle DimensionBindError() {
@@ -90,6 +94,9 @@ struct DimEntry {
     bool is_positional() const {
         return data_ < 0;
     }
+    bool is_none() const {
+        return data_ == 0;
+    }
     int64_t position() const {
         return data_;
     }
@@ -112,6 +119,17 @@ struct DimEntry {
 private:
     int64_t data_;
 };
+
+std::ostream& operator<<(std::ostream& ss, DimEntry entry) {
+    if (entry.is_none()) {
+        ss << "None";
+    } else if (entry.is_positional()) {
+        ss << entry.position();
+    } else {
+        ss << "D" << entry.dim()->level_;
+    }
+    return ss;
+}
 
 // Dim wrapper methods
 
@@ -511,6 +529,7 @@ static int Tensor_init(Tensor *self, PyObject *args, PyObject *kwargs) {
     PY_BEGIN
     #define ARGS(_) _(py::handle, tensor) _(py::handle, py_levels) _(int, has_device) _(py::handle, batchtensor)
     MPY_PARSE_ARGS_KWARGS("OOpO", ARGS)
+    #undef ARGS
 
     if (!THPVariable_Check(tensor.ptr())) {
         py::raise_error(PyExc_ValueError, "_tensor is not a Tensor?");
@@ -544,6 +563,92 @@ static int Tensor_init(Tensor *self, PyObject *args, PyObject *kwargs) {
     self->batchtensor_ = THPVariable_Unpack(batchtensor.ptr());
     return 0;
     PY_END(-1)
+}
+
+at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
+    auto levels = Slice<DimEntry>().extend(A, levels_);
+    while (true) {
+        int min_real_index = -1;
+        int min_index = -1;
+        int min_value = INT_MAX;
+        int i = 0;
+        int r = 0;
+        for (auto l : levels) {
+            if (!l.is_none()) {
+                if (!l.is_positional() && l.dim()->level_ < min_value) {
+                    min_value = l.dim()->level_;
+                    min_index = i;
+                    min_real_index = r;
+                }
+                ++i;
+            }
+            ++r;
+        }
+        if (min_index == -1) {
+            return t;
+        }
+        auto t2 = at::functorch::_add_batch_dim(std::move(t), min_index, min_value + 31);
+        t = std::move(t2);
+        levels[min_real_index] = DimEntry();
+    }
+}
+
+
+static PyObject* Tensor_from_positional(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    #define ARGS(_) _(py::handle, tensor) _(py::handle, py_levels) _(int, has_device)
+    MPY_PARSE_ARGS_KWNAMES("OOp", ARGS)
+    #undef ARGS
+
+    if (!THPVariable_Check(tensor.ptr())) {
+        py::raise_error(PyExc_ValueError, "_tensor is not a Tensor?");
+    }
+
+    Slice<DimEntry> levels;
+    py::sequence_view sq(py_levels);
+    size_t seen_dims = 0;
+    int last = 0;
+    for (auto i : c10::irange(sq.size())) {
+        py::object v = sq[i];
+        if (py::is_int(v)) {
+            auto vi = py::to_int(v);
+            levels = levels.append(A, vi);
+            AT_ASSERT(last == 0 || last + 1 == vi);
+            last = vi;
+        } else {
+            auto dim = Dim::wrap(std::move(v));
+            py::hdl<Dim> hdim = dim;
+            levels = levels.append(A, hdim);
+            dim.release();
+            ++seen_dims;
+        }
+    }
+    AT_ASSERT(last == 0 || last == -1);
+    if (!seen_dims) {
+        return py::object::borrow(tensor).release();
+    }
+
+
+    py::obj<Tensor> self = Tensor::create();
+    self->tensor_ = THPVariable_Unpack(tensor.ptr());
+    AT_ASSERT(self->tensor_.dim() == levels.size());
+    self->levels_.set(levels, [](Slice<DimEntry> s) {
+        for(auto e : s) {
+            if (!e.is_positional()) {
+                py::object::steal(e.dim());
+            }
+        }
+    });
+    self->has_device_ = has_device != 0;
+    self->batchtensor_ = _add_batch_dims(A, self->tensor_, self->levels_.slice());
+
+    return self.release();
+
+    PY_END(nullptr)
 }
 
 static PyGetSetDef Tensor_getsetters[] = {
@@ -917,6 +1022,8 @@ static PyMethodDef methods[] = {
     {"_wrap_method", (PyCFunction) _wrap_method, METH_FASTCALL | METH_KEYWORDS},
     {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
     {"_level_to_dim", (PyCFunction) _level_to_dim, METH_FASTCALL | METH_KEYWORDS},
+    {"Tensor_from_positional", (PyCFunction) Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
+
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
