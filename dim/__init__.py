@@ -1,5 +1,5 @@
 import torch
-from .batch_tensor import _add_batch_dims, _enable_layers
+from .batch_tensor import _enable_layers
 from typing import Union, Sequence
 import inspect
 import dis
@@ -377,30 +377,6 @@ class Dim(_C.Dim, _Tensor):
         if not isinstance(o, Dim) and isinstance(o, TensorLike):
             return torch.Tensor.__ne__(self, o)
         return object.__ne__(self, o)
-
-    @property
-    def _batchtensor(self):
-        r = getattr(self, '_batchtensor_cached', None)
-        if r is not None:
-            return r
-        r = self._batchtensor_cached = _add_batch_dims(self._tensor, self._levels)
-        return r
-
-    @property
-    def _has_device(self):
-        return False
-
-    @property
-    def _levels(self):
-        return (self,)
-
-    @property
-    def _tensor(self):
-        r = getattr(self, '_tensor_cached', None)
-        if r is not None:
-            return r
-        r = self._tensor_cached = torch.arange(self.size)
-        return r
 
 def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
     not_bound = tuple((i, r) for i, r in enumerate(rhs) if not r.is_bound)

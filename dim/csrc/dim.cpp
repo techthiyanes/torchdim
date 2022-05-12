@@ -36,7 +36,7 @@ static py::handle DimensionBindError() {
 constexpr int MAX_LEVELS_IN_USE = 32;
 static int n_levels_in_use = 0;
 static py::handle levels_in_use[MAX_LEVELS_IN_USE];
-
+constexpr int LEVEL_OFFSET = 31;
 
 PyTypeObject* DimType = nullptr;
 struct Dim : public py::base<Dim> {
@@ -83,8 +83,22 @@ struct Dim : public py::base<Dim> {
         return r;
     }
     static PyTypeObject Type;
+    const at::Tensor& range() {
+        if (!range_) {
+            range_ = at::arange(size_);
+        }
+        return *range_;
+    }
+    const at::Tensor& batchtensor() {
+        if (!batchtensor_) {
+            batchtensor_ = at::functorch::_add_batch_dim(range(), 0, level_ + LEVEL_OFFSET);
+        }
+        return *batchtensor_;
+    }
 private:
     int64_t size_;
+    at::optional<at::Tensor> range_;
+    at::optional<at::Tensor> batchtensor_;
 };
 
 struct DimEntry {
@@ -173,7 +187,25 @@ static PyObject* Dim_getis_bound(Dim* self, void*) {
 }
 
 static PyObject* Dim_getlevel(Dim* self, void*) {
-    return PyLong_FromLong(31 + self->level_);
+    return PyLong_FromLong(LEVEL_OFFSET + self->level_);
+}
+
+static PyObject* Dim_get_levels(Dim* self, void*) {
+    py::tuple t(1);
+    t.set(0, py::object::borrow(self->ptr()));
+    return t.release();
+}
+
+static PyObject* Dim_get_has_device(Dim* self, void*) {
+    Py_RETURN_FALSE;
+}
+
+static PyObject* Dim_get_tensor(Dim* self, void*) {
+    return THPVariable_Wrap(self->range());
+}
+
+static PyObject* Dim_get_batchtensor(Dim* self, void*) {
+    return THPVariable_Wrap(self->batchtensor());
 }
 
 
@@ -182,6 +214,11 @@ static PyGetSetDef Dim_getsetters[] = {
      "Dimension size", NULL},
     {"is_bound", (getter) Dim_getis_bound, NULL, "is_bound", NULL},
     {"_level", (getter) Dim_getlevel, NULL, "_level", NULL},
+    {"_levels", (getter) Dim_get_levels, NULL, "_levels", NULL},
+    {"_has_device", (getter) Dim_get_has_device, NULL, "_has_device", NULL},
+    {"_tensor", (getter) Dim_get_tensor, NULL, "_tensor", NULL},
+    {"_batchtensor", (getter) Dim_get_batchtensor, NULL, "_tensor", NULL},
+
     {NULL}  /* Sentinel */
 };
 
@@ -588,7 +625,7 @@ at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
         if (min_index == -1) {
             return t;
         }
-        auto t2 = at::functorch::_add_batch_dim(std::move(t), min_index, min_value + 31);
+        auto t2 = at::functorch::_add_batch_dim(std::move(t), min_index, min_value + LEVEL_OFFSET);
         t = std::move(t2);
         levels[min_real_index] = DimEntry();
     }
@@ -635,7 +672,7 @@ static PyObject* Tensor_from_batched(PyObject *self,
     at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(self->batchtensor_);
     AT_ASSERT(impl);
     while(true) {
-        auto level = impl->level() - 31;
+        auto level = impl->level() - LEVEL_OFFSET;
         py::hdl<Dim> dim = (Dim*) levels_in_use[level].ptr();
         levels = levels.insert(A, impl->bdim(), dim);
         py::object::borrow(dim).release();
@@ -1055,25 +1092,11 @@ static PyObject* _wrap_method(PyObject *self,
     PY_END(nullptr);
 }
 
-
-static PyObject* _level_to_dim(PyObject *self,
-                      PyObject *const *args,
-                      Py_ssize_t nargs,
-                      PyObject *kwnames) {
-    PY_BEGIN
-    AT_ASSERT(nargs == 1);
-    int l = py::to_int(args[0]) - 31;
-    AT_ASSERT(l < n_levels_in_use);
-    return py::object::borrow(levels_in_use[l]).release();
-    PY_END(nullptr);
-}
-
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
     {"_wrap_method", (PyCFunction) _wrap_method, METH_FASTCALL | METH_KEYWORDS},
     {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
-    {"_level_to_dim", (PyCFunction) _level_to_dim, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_positional", (PyCFunction) Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_batched", (PyCFunction) Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
 
