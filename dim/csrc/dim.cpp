@@ -562,47 +562,6 @@ public:
     }
 };
 
-static int Tensor_init(Tensor *self, PyObject *args, PyObject *kwargs) {
-    Arena A;
-    PY_BEGIN
-    #define ARGS(_) _(py::handle, tensor) _(py::handle, py_levels) _(int, has_device) _(py::handle, batchtensor)
-    MPY_PARSE_ARGS_KWARGS("OOpO", ARGS)
-    #undef ARGS
-
-    if (!THPVariable_Check(tensor.ptr())) {
-        py::raise_error(PyExc_ValueError, "_tensor is not a Tensor?");
-    }
-    if (!THPVariable_Check(batchtensor.ptr())) {
-        py::raise_error(PyExc_ValueError, "_batchtensor is not a Tensor?");
-    }
-    self->tensor_ = THPVariable_Unpack(tensor.ptr());
-    Slice<DimEntry> levels;
-    py::sequence_view sq(py_levels);
-    for (auto i : c10::irange(sq.size())) {
-        py::object v = sq[i];
-        if (py::is_int(v)) {
-            levels = levels.append(A, py::to_int(v));
-        } else {
-            auto dim = Dim::wrap(std::move(v));
-            py::hdl<Dim> hdim = dim;
-            levels = levels.append(A, hdim);
-            dim.release();
-        }
-    }
-    self->levels_.set(levels, [](Slice<DimEntry> s) {
-        for(auto e : s) {
-            if (!e.is_positional()) {
-                py::object::steal(e.dim());
-            }
-        }
-    });
-
-    self->has_device_ = has_device != 0;
-    self->batchtensor_ = THPVariable_Unpack(batchtensor.ptr());
-    return 0;
-    PY_END(-1)
-}
-
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
     auto levels = Slice<DimEntry>().extend(A, levels_);
     while (true) {
@@ -798,7 +757,7 @@ PyTypeObject Tensor::Type = {
     0,                              /* tp_descr_get */
     0,                              /* tp_descr_set */
     0,                              /* tp_dictoffset */
-    (initproc) Tensor_init,            /* tp_init */
+    0,            /* tp_init */
     0,                              /* tp_alloc */
     Tensor::new_stub,                      /* tp_new */
 };
