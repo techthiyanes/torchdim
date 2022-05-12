@@ -53,6 +53,9 @@ struct Slice {
     Slice insert(Arena& arena, Slice where, T v) {
         return insert(arena, where, Slice(&v, &v + 1));
     }
+    Slice insert(Arena& arena, int where, T v) {
+        return insert(arena, slice(where, where), v);
+    }
     Slice append(Arena& arena, T value);
     Slice extend(Arena& arena, Slice to_insert) {
         return insert(arena, slice(size_), to_insert);

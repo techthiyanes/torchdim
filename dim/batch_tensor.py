@@ -1,15 +1,10 @@
-from dataclasses import dataclass
-
 from functorch._C import (
     _add_batch_dim,
     _vmap_add_layers,
     _vmap_remove_layers,
-    maybe_get_bdim,
-    maybe_get_level,
-    get_unwrapped,
-    current_level,
 )
 import functorch._C
+
 
 from dim._C import _level_to_dim
 
@@ -45,14 +40,3 @@ def _add_batch_dims(t, levels):
         t = _add_batch_dim(t, i, l._level)
         del levels[i]
     return t
-
-def _remove_batch_dims(t):
-    levels = list(range(-t.ndim, 0))
-    while True:
-        l = maybe_get_level(t)
-        if l == -1:
-            break
-        d = maybe_get_bdim(t)
-        levels.insert(d, _level_to_dim(l))
-        t = get_unwrapped(t)
-    return t, levels

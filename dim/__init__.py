@@ -1,5 +1,5 @@
 import torch
-from .batch_tensor import _add_batch_dims, _remove_batch_dims, _enable_layers
+from .batch_tensor import _add_batch_dims, _enable_layers
 from typing import Union, Sequence
 import inspect
 import dis
@@ -426,11 +426,7 @@ def _bind_one_dim(lhs: 'Dim', rhs: 'Sequence[Dim]'):
         _bind_dims_to_size(lhs.size, rhs, lhs)
 
 class Tensor(_Tensor, _C.Tensor):
-    @staticmethod
-    def from_batched(batchtensor, has_device):
-        tensor, levels = _remove_batch_dims(batchtensor)
-        return Tensor(tensor, tuple(levels), has_device, batchtensor)
-
+    from_batched = staticmethod(_C.Tensor_from_batched)
     from_positional = staticmethod(_C.Tensor_from_positional)
 
 class DelayedMulTensor(Tensor):

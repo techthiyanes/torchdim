@@ -11,10 +11,12 @@ srcs = [
       'dim/csrc/dim.cpp',
 ]
 
+ft_home = os.path.dirname(os.path.dirname(os.path.abspath(functorch.__file__)))
+
 mintorch_C = CppExtension(
       'dim._C',
       srcs,
-      include_dirs = [os.path.dirname(os.path.abspath(__file__))],
+      include_dirs = [os.path.dirname(os.path.abspath(__file__)), ft_home],
       extra_compile_args = { "cxx": ["-Wno-write-strings", "-Wno-sign-compare"] },
       extra_link_args = [functorch._C.__file__]
 )

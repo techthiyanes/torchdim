@@ -6,6 +6,7 @@
 #include <iostream>
 #include <vector>
 #include <torch/csrc/autograd/python_variable.h>
+#include <functorch/csrc/BatchedTensorImpl.h>
 #include <ATen/ATen.h>
 #include "arena.h"
 
@@ -593,6 +594,63 @@ at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
     }
 }
 
+void free_levels_dims(Slice<DimEntry> levels) {
+    for(auto e : levels) {
+        if (!e.is_positional()) {
+            py::object::steal(e.dim());
+        }
+    }
+}
+
+// version in header does a unnecessary refcount +/-
+inline at::functorch::BatchedTensorImpl* maybeGetBatchedImpl(const at::Tensor& tensor) {
+    if (at::functorch::isBatchedTensor(tensor)) {
+        return static_cast<at::functorch::BatchedTensorImpl*>(tensor.unsafeGetTensorImpl());
+    }
+    return nullptr;
+}
+
+
+static PyObject* Tensor_from_batched(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    #define ARGS(_) _(py::handle, py_batchedtensor) _(int, has_device)
+    MPY_PARSE_ARGS_KWNAMES("Op", ARGS)
+    #undef ARGS
+
+    if (!THPVariable_Check(py_batchedtensor.ptr())) {
+        py::raise_error(PyExc_ValueError, "_batchedtensor is not a Tensor?");
+    }
+    py::obj<Tensor> self = Tensor::create();
+    self->batchtensor_ = THPVariable_Unpack(py_batchedtensor.ptr());
+    self->has_device_ = has_device != 0;
+
+    Slice<DimEntry> levels;
+    for (auto i : c10::irange(-self->batchtensor_.dim(), 0)) {
+        levels = levels.append(A, i);
+    }
+    at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(self->batchtensor_);
+    AT_ASSERT(impl);
+    while(true) {
+        auto level = impl->level() - 31;
+        py::hdl<Dim> dim = (Dim*) levels_in_use[level].ptr();
+        levels = levels.insert(A, impl->bdim(), dim);
+        py::object::borrow(dim).release();
+        at::functorch::BatchedTensorImpl * nimpl = maybeGetBatchedImpl(impl->value());
+        if (!nimpl) {
+            self->tensor_ = impl->value();
+            break;
+        }
+        impl = nimpl;
+    }
+    self->levels_.set(levels, free_levels_dims);
+    return self.release();
+    PY_END(nullptr)
+}
+
 
 static PyObject* Tensor_from_positional(PyObject *self,
                       PyObject *const *args,
@@ -636,13 +694,7 @@ static PyObject* Tensor_from_positional(PyObject *self,
     py::obj<Tensor> self = Tensor::create();
     self->tensor_ = THPVariable_Unpack(tensor.ptr());
     AT_ASSERT(self->tensor_.dim() == levels.size());
-    self->levels_.set(levels, [](Slice<DimEntry> s) {
-        for(auto e : s) {
-            if (!e.is_positional()) {
-                py::object::steal(e.dim());
-            }
-        }
-    });
+    self->levels_.set(levels, free_levels_dims);
     self->has_device_ = has_device != 0;
     self->batchtensor_ = _add_batch_dims(A, self->tensor_, self->levels_.slice());
 
@@ -1023,6 +1075,7 @@ static PyMethodDef methods[] = {
     {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
     {"_level_to_dim", (PyCFunction) _level_to_dim, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_positional", (PyCFunction) Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
+    {"Tensor_from_batched", (PyCFunction) Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
