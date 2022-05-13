@@ -154,6 +154,23 @@ inline std::ostream& operator<<(std::ostream& s, const Slice<T>& v) {
     return s;
 }
 
+struct TensorRef {
+    TensorRef()
+    : impl_(nullptr){}
+    TensorRef(const at::Tensor& t)
+    : impl_(t.unsafeGetTensorImpl()) {}
+    at::Tensor& operator*() const {
+        return *(at::Tensor*)this;
+    }
+    at::Tensor* operator->() const {
+        return (at::Tensor*)this;
+    }
+    operator bool() const {
+        return impl_ != nullptr;
+    }
+private:
+    at::TensorImpl* impl_;
+};
 
 constexpr int ARENA_MAX_SIZE = 4096;
 constexpr int ALIGNMENT = 8;
@@ -172,33 +189,30 @@ struct Arena {
         AT_ASSERT(allocated_ <= ARENA_MAX_SIZE);
         return result;
     }
-#if 0
-    at::Tensor* autorelease(at::Tensor s) {
-        ar_tensors_ = ar_tensors_.append(*this, std::move(s));
-        return &ar_tensors_.back();
+    TensorRef autorelease(at::Tensor s) {
+        auto ref = TensorRef(s);
+        s.unsafeReleaseTensorImpl();
+        ar_tensors_ = ar_tensors_.append(*this, ref);
+        return ref;
     }
     py::handle autorelease(py::object obj) {
-        ar_objects_ = ar_objects_.append(*this, std::move(obj));
+        ar_objects_ = ar_objects_.append(*this, obj);
+        obj.release();
         return ar_objects_.back();
     }
-#endif
     ~Arena() {
-#if 0
-        for(at::Tensor& t: ar_tensors_) {
-            delete &t;
+        for(TensorRef t: ar_tensors_) {
+            c10::intrusive_ptr<at::TensorImpl, at::UndefinedTensorImpl>::reclaim(t->unsafeGetTensorImpl());
         }
-        for(py::object& o: ar_objects_) {
-            delete &o;
+        for(py::handle h: ar_objects_) {
+            py::object::steal(h);
         }
-#endif
     }
 private:
     int64_t allocated_;
     char buffer_[ARENA_MAX_SIZE];
-#if 0
-    Slice<at::Tensor> ar_tensors_;
-    Slice<py::object> ar_objects_;
-#endif
+    Slice<TensorRef> ar_tensors_;
+    Slice<py::handle> ar_objects_;
 };
 
 template<typename T>

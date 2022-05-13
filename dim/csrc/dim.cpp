@@ -10,6 +10,7 @@
 #include <ATen/ATen.h>
 #include "arena.h"
 
+
 // C++ API functions for objects to
 // * construct the object, returning a ref-counted handle
 // * The actual API, with methods that take/return C-typed values
@@ -820,21 +821,24 @@ static PyObject* py_unflatten(PyObject *self,
     #undef ARGS
     py::sequence_view sv(ns);
     // because we do not have a autorelase pool yet...
-    std::vector<py::object> objs;
     Arena A;
     Slice<py::handle> slice;
-    for (auto i : c10::irange(sv.size())) {
-        objs.emplace_back(sv[i]);
-        slice = slice.append(A, objs.back());
+    py::handle Tuple = (PyObject*) &PyTuple_Type;
+    auto inputs = Tuple.call(ns);
+    py::tuple_view tv(inputs);
+    for (auto i : c10::irange(tv.size())) {
+        slice = slice.append(A, tv[i]);
     }
     auto AA = (UnflattenArena*) PyCapsule_GetPointer(self, "arena");
-    return AA->unflatten(slice).release();
+    auto r = AA->unflatten(slice).release();
+    AT_ASSERT(r != nullptr);
+    return r;
     PY_END(nullptr)
 }
 
 PyMethodDef py_unflatten_def = {"unflatten", (PyCFunction) py_unflatten, METH_FASTCALL | METH_KEYWORDS};
 
-typedef void free_unflatten_area(PyObject * pc) {
+void free_unflatten_arena(PyObject * pc) {
     delete (UnflattenArena*) PyCapsule_GetPointer(pc, "arena");
 }
 
@@ -848,9 +852,9 @@ static PyObject* py_tree_flatten(PyObject *self,
     #undef ARGS
     auto A = new UnflattenArena;
     Slice<py::handle> elements;
-    Unflatten unflatten_obj = tree_flatten(A->A, tree, elements);
-    auto cap = py::object::checked_steal(PyCapsule_New(A, "arena", free_unflatten_area));
-    auto unflatten = py::object::checked_steal(PyCFunction_New(&py_unflatten_def, cp.release()));
+    A->unflatten = tree_flatten(A->A, tree, elements);
+    auto cap = py::object::checked_steal(PyCapsule_New(A, "arena", free_unflatten_arena));
+    auto unflatten = py::object::checked_steal(PyCFunction_New(&py_unflatten_def, cap.release()));
     py::tuple r(2);
     r.set(0, slice_to_list(elements));
     r.set(1, std::move(unflatten));
@@ -917,6 +921,12 @@ static PyObject* __torch_function__(PyObject *self,
             return DelayedMulTensor.call_object(args_).release();
         }
     }
+    Slice<py::hdl<Dim>> all_dims;
+    Slice<py::handle> flat_args;
+    auto unflatten_args = tree_flatten(A, args_, flat_args);
+    auto unflatten_kwargs = tree_flatten(A, kwargs_, flat_args);
+    TensorRef device_holding_tensor;
+
 
 
     return cls.ptr();
@@ -1285,6 +1295,7 @@ static PyMethodDef methods[] = {
     {"Tensor_from_positional", (PyCFunction) Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_batched", (PyCFunction) Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
     {"__torch_function__", (PyCFunction) __torch_function__, METH_FASTCALL | METH_KEYWORDS},
+    {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };

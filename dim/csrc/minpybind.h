@@ -439,7 +439,7 @@ struct dict_view : public handle {
         return r;
     }
     void set(handle k, handle v) {
-        if (!PyDict_SetItem(ptr(), k.ptr(), v.ptr())) {
+        if (-1 == PyDict_SetItem(ptr(), k.ptr(), v.ptr())) {
             throw exception_set();
         }
     }
