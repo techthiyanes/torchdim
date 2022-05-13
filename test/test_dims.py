@@ -242,6 +242,14 @@ class TestMin(TestCase):
     def test_c(self):
         _test_c()
 
+    def test_seg(self):
+        A = torch.rand(3, 4)
+        i, k = dims()
+        i.size = 4
+        k.size = 3
+        r = i + k - 1
+
+
 def do_stuff(a):
     i = dims()
     i.size = 4

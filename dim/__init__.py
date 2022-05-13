@@ -33,7 +33,7 @@ class _Tensor:
     def dims(self):
         return tuple(d for d in self._levels if isinstance(d, Dim))
 
-    if False:
+    if True:
         __torch_function__ = classmethod(_C.__torch_function__)
     else:
         @classmethod

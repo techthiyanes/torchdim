@@ -48,6 +48,9 @@ struct Slice {
         }
         return c10::nullopt;
     }
+    bool contains(const T& value) {
+        return index(value).has_value();
+    }
 
     Slice insert(Arena& arena, Slice where, Slice to_insert);
     Slice insert(Arena& arena, Slice where, T v) {
@@ -113,7 +116,7 @@ protected:
 };
 
 template<typename T>
-struct OwnedSlice : public Slice<T> {
+struct OwnedSlice {
     typedef void (*deleter_t)(Slice<T>);
     static void _no_delete(Slice<T>) {}
     OwnedSlice()
@@ -159,7 +162,7 @@ struct TensorRef {
     : impl_(nullptr){}
     TensorRef(const at::Tensor& t)
     : impl_(t.unsafeGetTensorImpl()) {}
-    at::Tensor& operator*() const {
+    const at::Tensor& operator*() const {
         return *(at::Tensor*)this;
     }
     at::Tensor* operator->() const {
