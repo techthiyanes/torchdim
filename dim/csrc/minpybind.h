@@ -2,7 +2,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <utility>
-
+#include <iostream>
 
 #define PY_BEGIN try {
 #define PY_END(v) } catch(py::exception_set & err) { return (v); }
@@ -20,10 +20,14 @@ struct handle {
     handle()
     : ptr_(nullptr) {}
 
+
     PyObject* ptr() const {
         return ptr_;
     }
     object attr(const char* key);
+    handle type() const {
+        return (PyObject*) Py_TYPE(ptr());
+    }
 
     template<typename... Args>
     object call(Args&&... args);
@@ -34,9 +38,17 @@ struct handle {
         return ptr_ == rhs.ptr_;
     }
 
+    static handle checked(PyObject* ptr) {
+        if (!ptr) {
+            throw exception_set();
+        }
+        return ptr;
+    }
+
 protected:
     PyObject * ptr_;
 };
+
 
 template<typename T>
 struct obj;
@@ -355,6 +367,77 @@ struct slice_view {
 bool is_slice(handle h) {
     return PySlice_Check(h.ptr());
 }
+
+inline std::ostream& operator<<(std::ostream& ss, handle h) {
+    ss << PyUnicode_AsUTF8(str(h).ptr());
+    return ss;
+}
+
+struct tuple_view : public handle {
+    tuple_view() = default;
+    tuple_view(handle h) : handle(h) {}
+    Py_ssize_t size() const {
+        return PyTuple_GET_SIZE(ptr());
+    }
+    handle operator[](Py_ssize_t i) {
+        return PyTuple_GET_ITEM(ptr(), i);
+    }
+    static bool check(handle h) {
+        return PyTuple_Check(h.ptr());
+    }
+};
+
+struct list_view : public handle {
+    list_view() = default;
+    list_view(handle h) : handle(h) {}
+    Py_ssize_t size() const {
+        return PyList_GET_SIZE(ptr());
+    }
+    handle operator[](Py_ssize_t i) {
+        return PyList_GET_ITEM(ptr(), i);
+    }
+
+    static bool check(handle h) {
+        return PyList_Check(h.ptr());
+    }
+};
+
+struct dict_view : public handle {
+    dict_view() = default;
+    dict_view(handle h) : handle(h) {}
+    object keys() const {
+        return py::object::checked_steal(PyDict_Keys(ptr()));
+    }
+    object values() const {
+        return py::object::checked_steal(PyDict_Values(ptr()));
+    }
+    object items() const {
+        return py::object::checked_steal(PyDict_Items(ptr()));
+    }
+    bool contains(handle k) const {
+        return PyDict_Contains(ptr(), k.ptr());
+    }
+    handle operator[](handle k) {
+        return py::handle::checked(PyDict_GetItem(ptr(), k.ptr()));
+    }
+    static bool check(handle h) {
+        return PyDict_Check(h.ptr());
+    }
+    bool next(Py_ssize_t* pos, py::handle* key, py::handle* value) {
+        PyObject *k, *v;
+        auto r = PyDict_Next(ptr(), pos, &k, &v);
+        *key = k;
+        *value = v;
+        return r;
+    }
+    void set(handle k, handle v) {
+        if (!PyDict_SetItem(ptr(), k.ptr(), v.ptr())) {
+            throw exception_set();
+        }
+    }
+};
+
+
 
 }
 

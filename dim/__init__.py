@@ -33,66 +33,69 @@ class _Tensor:
     def dims(self):
         return tuple(d for d in self._levels if isinstance(d, Dim))
 
-    @classmethod
-    def __torch_function__(self, orig, cls, args, kwargs={}):
-        if orig is torch.Tensor.__mul__:
-            lhs, rhs = args
-            if isinstance(lhs, _Tensor) and isinstance(rhs, _Tensor) and lhs.ndim == 0 and rhs.ndim == 0:
-                #print("END", orig)
-                return DelayedMulTensor(lhs, rhs)
-        all_dims = []
-        flat_args, unflatten = tree_flatten((args, kwargs))
-        device_holding_tensor = None
-        for f in flat_args:
-            if isinstance(f, _Tensor):
-                if f._has_device:
-                    device_holding_tensor = f._batchtensor
-                for d in f.dims:
-                    if d not in all_dims:
-                        all_dims.append(d)
-        def unwrap(t):
-            if isinstance(t, _Tensor):
-                r = t._batchtensor
-                if device_holding_tensor is not None and not t._has_device:
-                    r = r.to(device=device_holding_tensor.device)
-                return r
-            return t
-
-        if orig in pointwise:
-            result_levels = []
-            arg_levels = []
-            to_expand = []
-            for i,f in enumerate(flat_args):
-                if isinstance(f, TensorLike):
-                    ptensor, levels, _ = _tensor_levels(f)
-                    if isinstance(f, _Tensor) and not f._has_device and device_holding_tensor is not None:
-                        ptensor = ptensor.to(device=device_holding_tensor.device)
-                    flat_args[i] = ptensor
-                    for l in levels:
-                        if l not in result_levels:
-                            result_levels.append(l)
-                    to_expand.append((i, levels))
-
-            for i, levels in to_expand:
-                flat_args[i] = _match_levels(flat_args[i], levels, result_levels)
-            args, kwargs = unflatten(flat_args)
-            result = orig(*args, **kwargs)
-            def wrap(t):
-                if isinstance(t, TensorLike):
-                    return Tensor.from_positional(t, result_levels, device_holding_tensor is not None)
+    if False:
+        __torch_function__ = classmethod(_C.__torch_function__)
+    else:
+        @classmethod
+        def __torch_function__(self, orig, cls, args, kwargs={}):
+            if orig is torch.Tensor.__mul__:
+                lhs, rhs = args
+                if isinstance(lhs, _Tensor) and isinstance(rhs, _Tensor) and lhs.ndim == 0 and rhs.ndim == 0:
+                    #print("END", orig)
+                    return DelayedMulTensor(lhs, rhs)
+            all_dims = []
+            flat_args, unflatten = tree_flatten((args, kwargs))
+            device_holding_tensor = None
+            for f in flat_args:
+                if isinstance(f, _Tensor):
+                    if f._has_device:
+                        device_holding_tensor = f._batchtensor
+                    for d in f.dims:
+                        if d not in all_dims:
+                            all_dims.append(d)
+            def unwrap(t):
+                if isinstance(t, _Tensor):
+                    r = t._batchtensor
+                    if device_holding_tensor is not None and not t._has_device:
+                        r = r.to(device=device_holding_tensor.device)
+                    return r
                 return t
-            return tree_map(wrap, result)
-        else:
-            def wrap(t):
-                if isinstance(t, TensorLike):
-                    return Tensor.from_batched(t, device_holding_tensor is not None)
-                return t
-            with _enable_layers(all_dims):
-                print(f"batch_tensor for {orig}")
-                args, kwargs = unflatten(unwrap(f) for f  in flat_args)
+
+            if orig in pointwise:
+                result_levels = []
+                arg_levels = []
+                to_expand = []
+                for i,f in enumerate(flat_args):
+                    if isinstance(f, TensorLike):
+                        ptensor, levels, _ = _tensor_levels(f)
+                        if isinstance(f, _Tensor) and not f._has_device and device_holding_tensor is not None:
+                            ptensor = ptensor.to(device=device_holding_tensor.device)
+                        flat_args[i] = ptensor
+                        for l in levels:
+                            if l not in result_levels:
+                                result_levels.append(l)
+                        to_expand.append((i, levels))
+
+                for i, levels in to_expand:
+                    flat_args[i] = _match_levels(flat_args[i], levels, result_levels)
+                args, kwargs = unflatten(flat_args)
                 result = orig(*args, **kwargs)
-                # print("END", orig)
+                def wrap(t):
+                    if isinstance(t, TensorLike):
+                        return Tensor.from_positional(t, result_levels, device_holding_tensor is not None)
+                    return t
                 return tree_map(wrap, result)
+            else:
+                def wrap(t):
+                    if isinstance(t, TensorLike):
+                        return Tensor.from_batched(t, device_holding_tensor is not None)
+                    return t
+                with _enable_layers(all_dims):
+                    print(f"batch_tensor for {orig}")
+                    args, kwargs = unflatten(unwrap(f) for f  in flat_args)
+                    result = orig(*args, **kwargs)
+                    # print("END", orig)
+                    return tree_map(wrap, result)
 
     def __repr__(self):
         tensor, levels = self._tensor, self._levels

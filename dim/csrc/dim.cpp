@@ -707,6 +707,151 @@ static PyObject* Tensor_from_positional(PyObject *self,
     PY_END(nullptr)
 }
 
+
+py::handle empty_dict;
+py::handle torch_Tensor___mul__;
+py::handle _Tensor;
+py::handle DelayedMulTensor;
+py::handle NamedTuple;
+
+
+enum UType {
+    U_ELEM,
+    U_TUPLE_LIKE,
+    U_DICT,
+};
+
+struct Unflatten {
+    py::object operator()(Slice<py::handle>& elements) {
+        py::object r;
+        switch (type) {
+            case U_ELEM: {
+                r = py::object::borrow(elements[0]);
+                elements = elements.slice(1);
+            } break;
+            case U_TUPLE_LIKE: {
+                py::tuple tup(children.size());
+                for (auto i : children.enumerate()) {
+                    tup.set(i, children[i](elements));
+                }
+                r = obj.call(tup);
+            } break;
+            case U_DICT: {
+                r = py::object::checked_steal(PyDict_New());
+                py::dict_view rv(r);
+                py::dict_view d(obj);
+                Py_ssize_t pos = 0;
+                py::handle k, v;
+                for (int i = 0; d.next(&pos, &k, &v); ++i) {
+                    rv.set(k, children[i](elements));
+                }
+            } break;
+        }
+        return r;
+    }
+    UType type;
+    py::handle obj;
+    Slice<Unflatten> children;
+};
+
+Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_elements) {
+    Slice<Unflatten> c;
+    UType utype;
+    py::handle obj;
+    if (py::list_view::check(agg)) {
+        obj = agg.type();
+        utype = U_TUPLE_LIKE;
+        py::list_view l(agg);
+        for (auto i : c10::irange(l.size())) {
+            c = c.append(A, tree_flatten(A, l[i], flat_elements));
+        }
+    } else if (py::tuple_view::check(agg)) {
+        obj = agg.type();
+        utype = U_TUPLE_LIKE;
+        // includes named tuples
+        py::tuple_view l(agg);
+        for (auto i : c10::irange(l.size())) {
+            c = c.append(A, tree_flatten(A, l[i], flat_elements));
+        }
+    } else if (py::dict_view::check(agg)) {
+        utype = U_DICT;
+        py::dict_view d(agg);
+        obj = agg;
+        Py_ssize_t pos = 0;
+        py::handle k, v;
+        while (d.next(&pos, &k, &v)) {
+            c = c.append(A, tree_flatten(A, v, flat_elements));
+        }
+    } else {
+        utype = U_ELEM;
+        flat_elements = flat_elements.append(A, agg);
+    }
+    return Unflatten {utype, obj, c};
+}
+
+py::object tree_map(Arena& A, std::function<py::handle(py::handle)> fn, py::handle agg) {
+    Slice<py::handle> elements;
+    auto unflatten = tree_flatten(A, agg, elements);
+    for (auto i : elements.enumerate()) {
+        elements[i] = fn(elements[i]);
+    }
+    return unflatten(elements);
+}
+
+static void maybeInitializeGlobals() {
+    if (empty_dict.ptr()) {
+        return;
+    }
+    auto torch = py::import("torch");
+    auto dim = py::import("dim");
+    empty_dict = PyDict_New();
+    torch_Tensor___mul__ = torch.attr("Tensor").attr("__mul__");
+    _Tensor = dim.attr("_Tensor");
+    DelayedMulTensor = dim.attr("DelayedMulTensor");
+    NamedTuple = py::import("typing").attr("NamedTuple");
+}
+
+// prereq: isinstance(h, _Tensor)
+inline int64_t _Tensor_ndim(py::handle h) {
+    if (Tensor::check(h)) {
+        int64_t r = 0;
+        for (auto l : Tensor::unchecked_wrap(h)->levels_) {
+            if (l.is_positional()) {
+                ++r;
+            }
+        }
+        return r;
+    }
+    // Dim or DelayedMulTensor
+    return 0;
+}
+
+static PyObject* __torch_function__(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    #define ARGS(_) _(py::handle, cls) _(py::handle, orig) _(py::handle, cls2) _(py::tuple_view, args_) _(py::handle, kwargs_)
+    MPY_PARSE_ARGS_KWNAMES("OOOO|O", ARGS)
+    #undef ARGS
+    maybeInitializeGlobals();
+    if (!kwargs_.ptr()) {
+        kwargs_ = empty_dict;
+    }
+
+    if (orig == torch_Tensor___mul__) {
+        AT_ASSERT(args_.size() == 2);
+        if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args[1]) == 0) {
+            return DelayedMulTensor.call_object(args_).release();
+        }
+    }
+
+
+    return cls.ptr();
+    PY_END(nullptr)
+}
+
 static PyGetSetDef Tensor_getsetters[] = {
    {"_has_device", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_bool(((Tensor*)self)->has_device_).release(); }, NULL},
    {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->tensor_); }, NULL},
@@ -1066,6 +1211,7 @@ static PyMethodDef methods[] = {
     {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
     {"Tensor_from_positional", (PyCFunction) Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_batched", (PyCFunction) Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
+    {"__torch_function__", (PyCFunction) __torch_function__, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
