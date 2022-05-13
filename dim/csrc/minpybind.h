@@ -264,6 +264,14 @@ struct tuple : public object {
     : object(checked_steal(PyTuple_New(size))) {}
 };
 
+struct list : public object {
+    void set(int i, object v) {
+        PyList_SET_ITEM(ptr_, i, v.release());
+    }
+    list(int size)
+    : object(checked_steal(PyList_New(size))) {}
+};
+
 py::object unicode_from_format(const char* format, ...) {
     va_list args;
     va_start(args, format);

@@ -715,6 +715,22 @@ py::handle DelayedMulTensor;
 py::handle NamedTuple;
 
 
+py::list slice_to_list(Slice<py::handle> h) {
+    py::list lst(h.size());
+    for (auto i : h.enumerate()) {
+        lst.set(i, py::object::borrow(h[i]));
+    }
+    return lst;
+}
+
+py::tuple tuple_to_list(Slice<py::handle> h) {
+    py::tuple lst(h.size());
+    for (auto i : h.enumerate()) {
+        lst.set(i, py::object::borrow(h[i]));
+    }
+    return lst;
+}
+
 enum UType {
     U_ELEM,
     U_TUPLE_LIKE,
@@ -788,6 +804,61 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
     }
     return Unflatten {utype, obj, c};
 }
+
+struct UnflattenArena {
+    Arena A;
+    Unflatten unflatten;
+};
+
+static PyObject* py_unflatten(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+    #define ARGS(_) _(py::handle, ns)
+    MPY_PARSE_ARGS_KWNAMES("O", ARGS)
+    #undef ARGS
+    py::sequence_view sv(ns);
+    // because we do not have a autorelase pool yet...
+    std::vector<py::object> objs;
+    Arena A;
+    Slice<py::handle> slice;
+    for (auto i : c10::irange(sv.size())) {
+        objs.emplace_back(sv[i]);
+        slice = slice.append(A, objs.back());
+    }
+    auto AA = (UnflattenArena*) PyCapsule_GetPointer(self, "arena");
+    return AA->unflatten(slice).release();
+    PY_END(nullptr)
+}
+
+PyMethodDef py_unflatten_def = {"unflatten", (PyCFunction) py_unflatten, METH_FASTCALL | METH_KEYWORDS};
+
+typedef void free_unflatten_area(PyObject * pc) {
+    delete (UnflattenArena*) PyCapsule_GetPointer(pc, "arena");
+}
+
+static PyObject* py_tree_flatten(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+    #define ARGS(_) _(py::handle, tree)
+    MPY_PARSE_ARGS_KWNAMES("O", ARGS)
+    #undef ARGS
+    auto A = new UnflattenArena;
+    Slice<py::handle> elements;
+    Unflatten unflatten_obj = tree_flatten(A->A, tree, elements);
+    auto cap = py::object::checked_steal(PyCapsule_New(A, "arena", free_unflatten_area));
+    auto unflatten = py::object::checked_steal(PyCFunction_New(&py_unflatten_def, cp.release()));
+    py::tuple r(2);
+    r.set(0, slice_to_list(elements));
+    r.set(1, std::move(unflatten));
+    return r.release();
+    PY_END(nullptr)
+}
+
+
 
 py::object tree_map(Arena& A, std::function<py::handle(py::handle)> fn, py::handle agg) {
     Slice<py::handle> elements;
@@ -1189,17 +1260,19 @@ static PyObject* call_torch_function(PyObject* self, PyObject* args, PyObject* k
     PY_END(nullptr)
 }
 
+PyMethodDef wrapper_method =  {"wrapper", (PyCFunction) call_torch_function, METH_VARARGS | METH_KEYWORDS };
+
+
 static PyObject* _wrap_method(PyObject *self,
                       PyObject *const *args,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
     PY_BEGIN
     AT_ASSERT(nargs == 2);
-    PyMethodDef* md = new PyMethodDef {"wrapper", (PyCFunction) call_torch_function, METH_VARARGS | METH_KEYWORDS }; // leaks PyMethodDef
     py::tuple s(2);
     s.set(0, py::object::borrow(args[0]));
     s.set(1, py::object::borrow(args[1]));
-    auto r = py::object::checked_steal(PyCFunction_New(md, s.release()));
+    auto r = py::object::checked_steal(PyCFunction_New(&wrapper_method, s.release()));
     return PyInstanceMethod_New(r.release());
     PY_END(nullptr);
 }
