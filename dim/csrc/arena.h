@@ -90,6 +90,13 @@ struct Slice {
         return c10::irange(size_);
     }
 
+    bool operator==(const Slice<T>& rhs) const {
+        if (size() != rhs.size()) {
+            return false;
+        }
+        return std::equal(begin(), end(), rhs.begin());
+    }
+
 protected:
     Slice(T* begin, T* end)
     : begin_(begin), size_(end - begin), capacity_(size_) {}

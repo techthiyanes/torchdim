@@ -34,6 +34,8 @@ py::handle torch_Tensor___mul__;
 py::handle _Tensor;
 py::handle DelayedMulTensor;
 py::handle NamedTuple;
+py::dict_view pointwise;
+
 static void maybeInitializeGlobals() {
     if (empty_dict.ptr()) {
         return;
@@ -45,6 +47,7 @@ static void maybeInitializeGlobals() {
     _Tensor = dim.attr("_Tensor");
     DelayedMulTensor = dim.attr("DelayedMulTensor");
     NamedTuple = py::import("typing").attr("NamedTuple");
+    pointwise = dim.attr("pointwise");
 }
 
 py::handle DimensionBindError_;
@@ -739,7 +742,35 @@ static PyObject* py_Tensor_from_batched(PyObject *self,
 }
 
 
-static PyObject* Tensor_from_positional(PyObject *self,
+static py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
+    size_t seen_dims = 0;
+    int last = 0;
+    for (auto l : levels) {
+        if (l.is_positional()) {
+            AT_ASSERT(last == 0 || last + 1 == l.position());
+            last = l.position();
+        } else {
+            py::object::borrow(l.dim()).release();
+            ++seen_dims;
+        }
+    }
+    AT_ASSERT(last == 0 || last == -1);
+    if (!seen_dims) {
+        return py::object::borrow(THPVariable_Wrap(std::move(tensor)));
+    }
+
+    py::obj<Tensor> self = Tensor::create();
+    self->tensor_ = std::move(tensor);
+    AT_ASSERT(self->tensor_.dim() == levels.size());
+    self->levels_.set(levels, free_levels_dims);
+    self->has_device_ = has_device;
+    self->batchtensor_ = _add_batch_dims(A, self->tensor_, self->levels_.slice());
+    py::object r = std::move(self);
+    return r;
+}
+
+
+static PyObject* py_Tensor_from_positional(PyObject *self,
                       PyObject *const *args,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
@@ -755,38 +786,18 @@ static PyObject* Tensor_from_positional(PyObject *self,
 
     Slice<DimEntry> levels;
     py::sequence_view sq(py_levels);
-    size_t seen_dims = 0;
-    int last = 0;
     for (auto i : c10::irange(sq.size())) {
         py::object v = sq[i];
         if (py::is_int(v)) {
             auto vi = py::to_int(v);
             levels = levels.append(A, vi);
-            AT_ASSERT(last == 0 || last + 1 == vi);
-            last = vi;
         } else {
             auto dim = Dim::wrap(std::move(v));
             py::hdl<Dim> hdim = dim;
             levels = levels.append(A, hdim);
-            dim.release();
-            ++seen_dims;
         }
     }
-    AT_ASSERT(last == 0 || last == -1);
-    if (!seen_dims) {
-        return py::object::borrow(tensor).release();
-    }
-
-
-    py::obj<Tensor> self = Tensor::create();
-    self->tensor_ = THPVariable_Unpack(tensor.ptr());
-    AT_ASSERT(self->tensor_.dim() == levels.size());
-    self->levels_.set(levels, free_levels_dims);
-    self->has_device_ = has_device != 0;
-    self->batchtensor_ = _add_batch_dims(A, self->tensor_, self->levels_.slice());
-
-    return self.release();
-
+    return Tensor_from_positional(A, THPVariable_Unpack(tensor.ptr()), levels, has_device != 0).release();
     PY_END(nullptr)
 }
 
@@ -993,6 +1004,30 @@ private:
     int64_t N;
 };
 
+TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slice<DimEntry> to_levels) {
+    if (from_levels == to_levels) {
+        return v;
+    }
+    at::IntArrayRef sz = v->sizes();
+    at::IntArrayRef sd = v->strides();
+    AT_ASSERT(from_levels.size() <= to_levels.size());
+    Slice<int64_t> nsz;
+    Slice<int64_t> nsd;
+    for (auto l : to_levels) {
+        auto oidx = from_levels.index(l);
+        if (!oidx) {
+            nsz = nsz.append(A, 1);
+            nsd = nsd.append(A, 0);
+        } else {
+            auto idx = *oidx;
+            nsz = nsz.append(A, sz[idx]);
+            nsd = nsd.append(A, sd[idx]);
+        }
+    }
+    return A.autorelease(v->as_strided(at::IntArrayRef(nsz.begin(), nsz.end()), at::IntArrayRef(nsd.begin(), nsd.end()), v->storage_offset()));
+}
+
+
 static PyObject* __torch_function__(PyObject *self,
                       PyObject *const *args,
                       Py_ssize_t nargs,
@@ -1006,7 +1041,8 @@ static PyObject* __torch_function__(PyObject *self,
     if (!kwargs_.ptr()) {
         kwargs_ = empty_dict;
     }
-    std::cout << "__torch_function__ " << orig << "\n";
+    bool is_pointwise = pointwise.contains(orig);
+    std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
 
     if (orig == torch_Tensor___mul__) {
         AT_ASSERT(args_.size() == 2);
@@ -1020,7 +1056,6 @@ static PyObject* __torch_function__(PyObject *self,
     auto unflatten_kwargs = tree_flatten(A, kwargs_, flat_args);
     TensorRef device_holding_tensor;
 
-    bool is_pointwise = false;
 
     Slice<TensorInfo> infos;
     Slice<DimEntry> result_levels;
@@ -1028,7 +1063,7 @@ static PyObject* __torch_function__(PyObject *self,
         infos = infos.append(A, TensorInfo::create(A, f, !is_pointwise, false));
         if (infos.back()) {
             TensorInfo& info = infos.back();
-            AT_ASSERT(info.batchedtensor);
+            AT_ASSERT(is_pointwise || info.batchedtensor);
             if (!device_holding_tensor && info.has_device) {
                 device_holding_tensor = infos.back().tensor;
             }
@@ -1041,7 +1076,26 @@ static PyObject* __torch_function__(PyObject *self,
     }
 
     if (is_pointwise) {
-        AT_ASSERT(false);
+        for (auto i : flat_args.enumerate()) {
+            if (infos[i]) {
+                TensorRef tensor = infos[i].tensor;
+                if (device_holding_tensor && !infos[i].has_device) {
+                    tensor = A.autorelease(tensor->to(device_holding_tensor->device()));
+                }
+                flat_args[i] = handle_from_tensor(A, _match_levels(A, tensor, infos[i].levels, result_levels));
+            }
+        }
+        Slice<py::handle> flat_it = flat_args;
+        py::object uargs = unflatten_args(flat_it);
+        py::object ukwargs = unflatten_kwargs(flat_it);
+        py::object result = orig.call_object(uargs, ukwargs);
+        auto wrap = [&](py::handle h) {
+            if (THPVariable_Check(h.ptr())){
+                return A.autorelease(Tensor_from_positional(A, THPVariable_Unpack(h.ptr()), result_levels, device_holding_tensor));
+            }
+            return h;
+        };
+        return tree_map(A, wrap, result).release();
     } else {
         // std::cout << "rl: " << result_levels << "\n";
         EnableAllLayers guard(result_levels);
@@ -1431,7 +1485,7 @@ static PyMethodDef methods[] = {
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
     {"_wrap_method", (PyCFunction) _wrap_method, METH_FASTCALL | METH_KEYWORDS},
     {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
-    {"Tensor_from_positional", (PyCFunction) Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
+    {"Tensor_from_positional", (PyCFunction) py_Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_batched", (PyCFunction) py_Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
     {"__torch_function__", (PyCFunction) __torch_function__, METH_FASTCALL | METH_KEYWORDS},
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
