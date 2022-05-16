@@ -250,6 +250,11 @@ class TestMin(TestCase):
         k.size = 3
         r = i + k - 1
 
+    def test_expand(self):
+        A = torch.rand(3, 4)
+        i = dims()
+        assert list(A[i].expand(2, 4).positional(i).size()) == [3, 2, 4]
+
 
 def do_stuff(a):
     i = dims()

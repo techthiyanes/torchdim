@@ -35,6 +35,7 @@ py::handle _Tensor;
 py::handle DelayedMulTensor;
 py::handle NamedTuple;
 py::dict_view pointwise;
+py::handle torch_Tensor_expand;
 
 static void maybeInitializeGlobals() {
     if (empty_dict.ptr()) {
@@ -48,6 +49,7 @@ static void maybeInitializeGlobals() {
     DelayedMulTensor = dim.attr("DelayedMulTensor");
     NamedTuple = py::import("typing").attr("NamedTuple");
     pointwise = dim.attr("pointwise");
+    torch_Tensor_expand = torch.attr("Tensor").attr("expand");
 }
 
 py::handle DimensionBindError_;
@@ -809,7 +811,7 @@ py::list slice_to_list(Slice<py::handle> h) {
     return lst;
 }
 
-py::tuple tuple_to_list(Slice<py::handle> h) {
+py::tuple slice_to_tuple(Slice<py::handle> h) {
     py::tuple lst(h.size());
     for (auto i : h.enumerate()) {
         lst.set(i, py::object::borrow(h[i]));
@@ -1028,26 +1030,15 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
 }
 
 
-static PyObject* __torch_function__(PyObject *self,
-                      PyObject *const *args,
-                      Py_ssize_t nargs,
-                      PyObject *kwnames) {
-    Arena A;
-    PY_BEGIN
-    #define ARGS(_) _(py::handle, cls) _(py::handle, orig) _(py::handle, cls2) _(py::tuple_view, args_) _(py::handle, kwargs_)
-    MPY_PARSE_ARGS_KWNAMES("OOOO|O", ARGS)
-    #undef ARGS
+static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
     maybeInitializeGlobals();
-    if (!kwargs_.ptr()) {
-        kwargs_ = empty_dict;
-    }
     bool is_pointwise = pointwise.contains(orig);
     std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
 
     if (orig == torch_Tensor___mul__) {
         AT_ASSERT(args_.size() == 2);
-        if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args[1]) == 0) {
-            return DelayedMulTensor.call_object(args_).release();
+        if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args_[1]) == 0) {
+            return DelayedMulTensor.call_object(args_);
         }
     }
     Slice<py::hdl<Dim>> all_dims;
@@ -1095,7 +1086,7 @@ static PyObject* __torch_function__(PyObject *self,
             }
             return h;
         };
-        return tree_map(A, wrap, result).release();
+        return tree_map(A, wrap, result);
     } else {
         // std::cout << "rl: " << result_levels << "\n";
         EnableAllLayers guard(result_levels);
@@ -1120,9 +1111,24 @@ static PyObject* __torch_function__(PyObject *self,
             }
             return h;
         };
-        return tree_map(A, wrap, result).release();
+        return tree_map(A, wrap, result);
     }
+}
 
+
+static PyObject* py___torch_function__(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    #define ARGS(_) _(py::handle, cls) _(py::handle, orig) _(py::handle, cls2) _(py::tuple_view, args_) _(py::handle, kwargs_)
+    MPY_PARSE_ARGS_KWNAMES("OOOO|O", ARGS)
+    #undef ARGS
+    if (!kwargs_.ptr()) {
+        kwargs_ = empty_dict;
+    }
+    return __torch_function__(A, orig, args_, kwargs_).release();
     PY_END(nullptr)
 }
 
@@ -1578,6 +1584,45 @@ static PyObject* positional(PyObject *_,
     PY_END(nullptr)
 }
 
+static PyObject* expand(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    AT_ASSERT(nargs-- > 0);
+    auto self = Tensor::wrap(args++[0]);
+    for (auto i : c10::irange(nargs)) {
+        if (!Dim::check(args[i])) {
+            maybeInitializeGlobals();
+            auto newargs = slice_to_tuple(Slice<py::handle>((py::handle*)args - 1, (py::handle*)args + nargs));
+            return __torch_function__(A, torch_Tensor_expand, newargs, empty_dict).release();
+        }
+    }
+    at::Tensor& data = self->tensor_;
+    auto levels = self->levels_.slice();
+    Slice<DimEntry> new_levels;
+    Slice<int64_t> sz;
+    Slice<int64_t> sd;
+    for (auto i : c10::irange(nargs)) {
+        auto d = Dim::unchecked_wrap(args[i]);
+        if (levels.contains(d) || new_levels.contains(d)) {
+            py::raise_error(DimensionBindError(), "expanding dimension %R already exists in tensor with dims", d.ptr());
+        }
+        new_levels = new_levels.append(A, d);
+        sz = sz.append(A, d->size());
+        sd = sd.append(A, 0);
+    }
+    new_levels = new_levels.extend(A, levels);
+    at::IntArrayRef osz = data.sizes();
+    at::IntArrayRef osd = data.strides();
+    sz = sz.extend(A, osz.begin(), osz.end());
+    sd = sd.extend(A, osd.begin(), osd.end());
+    at::Tensor ndata = data.as_strided(at::IntArrayRef(sz.begin(), sz.end()), at::IntArrayRef(sd.begin(), sd.end()), data.storage_offset());
+    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device_).release();
+    PY_END(nullptr)
+}
+
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
@@ -1585,9 +1630,10 @@ static PyMethodDef methods[] = {
     {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
     {"Tensor_from_positional", (PyCFunction) py_Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_from_batched", (PyCFunction) py_Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
-    {"__torch_function__", (PyCFunction) __torch_function__, METH_FASTCALL | METH_KEYWORDS},
+    {"__torch_function__", (PyCFunction) py___torch_function__, METH_FASTCALL | METH_KEYWORDS},
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
+    {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };

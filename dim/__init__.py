@@ -168,13 +168,16 @@ class _Tensor:
 
     # these are overloads of the original API
     #
-    def expand(self, *sizes):
-        if not _contains_dim(sizes):
-            return self.__torch_function__(torch.Tensor.expand, None, (self, *sizes))
-        dims = sizes
-        sizes = [d.size for d in dims] + [-1]*self.ndim
-        self = self.expand(*sizes)
-        return self[dims]
+    if True:
+        expand = _C._instancemethod(_C.expand)
+    else:
+        def expand(self, *sizes):
+            if not _contains_dim(sizes):
+                return self.__torch_function__(torch.Tensor.expand, None, (self, *sizes))
+            dims = sizes
+            sizes = [d.size for d in dims] + [-1]*self.ndim
+            self = self.expand(*sizes)
+            return self[dims]
 
     def gather(self, dims, values):
         if isinstance(dims, int):

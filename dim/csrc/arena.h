@@ -63,6 +63,9 @@ struct Slice {
     Slice extend(Arena& arena, Slice to_insert) {
         return insert(arena, slice(size_), to_insert);
     }
+    Slice extend(Arena& arena, const T* begin, const T* end) {
+        return extend(arena, Slice<T>((T*)begin, (T*)end));
+    }
 
     Slice slice(int begin) {
         return slice(begin, size_);
@@ -97,10 +100,10 @@ struct Slice {
         return std::equal(begin(), end(), rhs.begin());
     }
 
-protected:
     Slice(T* begin, T* end)
     : begin_(begin), size_(end - begin), capacity_(size_) {}
 
+protected:
     static int _length(const T& t) {
         return 1;
     }
