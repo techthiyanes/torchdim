@@ -225,6 +225,7 @@ class TestMin(TestCase):
         x = torch.rand(3, 4)
         z = x[i, j]
         print(z + z + z + z)
+        print(z.positional(i, j))
 
     def test_mm_fuse(self):
         i, j, k = dims()

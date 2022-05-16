@@ -101,42 +101,44 @@ class _Tensor:
     def __repr__(self):
         tensor, levels = self._tensor, self._levels
         return f'{tensor}\nwith dims={levels} {tensor.size()}'
+    if True:
+        positional = _C._instancemethod(_C.positional)
+    else:
+        def positional(self, *dims):
+            ptensor, levels = self._tensor, list(self._levels)
+            flat_dims = []
+            view = []
+            needs_view = False
+            for d in dims:
+                if isinstance(d, DimList):
+                    flat_dims.extend(d)
+                    view.extend(e.size for e in d)
+                elif isinstance(d, Dim):
+                    flat_dims.append(d)
+                    view.append(d.size)
+                else:
+                    flat_dims.extend(d)
+                    view.append(prod(e.size for e in d))
+                    needs_view = True
 
-    def positional(self, *dims):
-        ptensor, levels = self._tensor, list(self._levels)
-        flat_dims = []
-        view = []
-        needs_view = False
-        for d in dims:
-            if isinstance(d, DimList):
-                flat_dims.extend(d)
-                view.extend(e.size for e in d)
-            elif isinstance(d, Dim):
-                flat_dims.append(d)
-                view.append(d.size)
-            else:
-                flat_dims.extend(d)
-                view.append(prod(e.size for e in d))
-                needs_view = True
-
-        permute = list(range(len(levels)))
-        ndim = self.ndim
-        nflat = len(flat_dims)
-        for i, d in enumerate(flat_dims):
-            try:
-                idx = levels.index(d)
-            except ValueError as e:
-                raise DimensionBindError(f'tensor of dimensions {self.dims} does not contain dim {d}') from e
-            p = permute[idx]
-            del levels[idx]
-            del permute[idx]
-            levels.insert(i, -ndim - (nflat - i))
-            permute.insert(i, p)
-        ptensor = ptensor.permute(*permute)
-        result = Tensor.from_positional(ptensor, levels, self._has_device)
-        if needs_view:
-            result = result.reshape(*view, *result.size()[len(flat_dims):])
-        return result
+            permute = list(range(len(levels)))
+            ndim = self.ndim
+            nflat = len(flat_dims)
+            for i, d in enumerate(flat_dims):
+                try:
+                    idx = levels.index(d)
+                except ValueError as e:
+                    raise DimensionBindError(f'tensor of dimensions {self.dims} does not contain dim {d}') from e
+                p = permute[idx]
+                del levels[idx]
+                del permute[idx]
+                levels.insert(i, -ndim - (nflat - i))
+                permute.insert(i, p)
+            ptensor = ptensor.permute(*permute)
+            result = Tensor.from_positional(ptensor, levels, self._has_device)
+            if needs_view:
+                result = result.reshape(*view, *result.size()[len(flat_dims):])
+            return result
 
     # make a single dimension positional but do not permute it,
     # used to do multi-tensor operators where the dim being acted on

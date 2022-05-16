@@ -1016,7 +1016,7 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
     for (auto l : to_levels) {
         auto oidx = from_levels.index(l);
         if (!oidx) {
-            nsz = nsz.append(A, 1);
+            nsz = nsz.append(A, l.is_positional() ? 1 : l.dim()->size());
             nsd = nsd.append(A, 0);
         } else {
             auto idx = *oidx;
@@ -1126,18 +1126,22 @@ static PyObject* __torch_function__(PyObject *self,
     PY_END(nullptr)
 }
 
+py::object levels_to_tuple(Slice<DimEntry> slice) {
+    py::tuple t(slice.size());
+    for (auto i : slice.enumerate()) {
+        t.set(i, slice[i].is_positional() ?  py::from_int(slice[i].position()) : py::object::borrow(slice[i].dim()));
+    }
+    py::object r = std::move(t);
+    return r;
+}
+
 static PyGetSetDef Tensor_getsetters[] = {
    {"_has_device", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_bool(((Tensor*)self)->has_device_).release(); }, NULL},
    {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->tensor_); }, NULL},
    {"_batchtensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->batchtensor_); }, NULL},
    {"_levels", (getter) [](PyObject* self, void*) -> PyObject* {
        PY_BEGIN
-       auto slice = ((Tensor*)self)->levels_.slice();
-       py::tuple t(slice.size());
-       for (auto i : slice.enumerate()) {
-            t.set(i, slice[i].is_positional() ?  py::from_int(slice[i].position()) : py::object::borrow(slice[i].dim()));
-       }
-       return t.release();
+       return levels_to_tuple(((Tensor*)self)->levels_.slice()).release();
        PY_END(nullptr)
    }},
     {NULL}  /* Sentinel */
@@ -1480,6 +1484,100 @@ static PyObject* _wrap_method(PyObject *self,
     PY_END(nullptr);
 }
 
+static PyObject* positional(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    AT_ASSERT(nargs-- > 0);
+    auto self = Tensor::wrap(args++[0]);
+    at::Tensor& data = self->tensor_;
+    auto levels = Slice<DimEntry>().extend(A, self->levels_.slice());
+
+
+    at::IntArrayRef sz = data.sizes();
+    at::IntArrayRef sd = data.strides();
+
+    Slice<int64_t> view_sizes;
+    Slice<DimEntry> new_levels;
+
+    Slice<int64_t> nsz;
+    Slice<int64_t> nsd;
+
+
+    auto append = [&](py::hdl<Dim> d) {
+        auto midx = levels.index(d);
+        if (!midx) {
+            py::raise_error(DimensionBindError(), "tensor of dimensions %R does not contain dim %R", levels_to_tuple(levels).ptr(), d.ptr());
+        }
+        auto idx = *midx;
+        levels[idx] = DimEntry();
+        nsz = nsz.append(A, sz[idx]);
+        nsd = nsd.append(A, sd[idx]);
+    };
+    auto append_level = [&](int64_t sz) {
+        view_sizes = view_sizes.append(A, sz);
+        // we will recalculate the positional indices when we know how many were created
+        new_levels = new_levels.append(A, DimEntry());
+    };
+
+    bool needs_view = false;
+    for (auto i : c10::irange(nargs)) {
+        py::handle arg  = args[i];
+        if (DimList::check(arg)) {
+            auto dl = DimList::unchecked_wrap(arg);
+            for (py::obj<Dim> & d : dl->dims_) {
+                append(d);
+                append_level(d->size());
+            }
+        } else if (Dim::check(arg)) {
+            auto d = Dim::unchecked_wrap(arg);
+            append(d);
+            append_level(d->size());
+
+        } else {
+            if (!py::is_sequence(arg)) {
+                py::raise_error(PyExc_ValueError, "expected a Dim, List[Dim], or Sequence[Dim]");
+            }
+            py::sequence_view sq(arg);
+            int64_t new_size = 1;
+            for (auto j : c10::irange(sq.size())) {
+                py::obj<Dim> d = Dim::wrap(sq[j]);
+                append(d);
+                new_size *= d->size();
+            }
+            append_level(new_size);
+            needs_view = true;
+        }
+    }
+    for (auto i : levels.enumerate()) {
+        auto & l = levels[i];
+        if (l.is_none())
+            continue;
+        new_levels = new_levels.append(A, l);
+        nsz = nsz.append(A, sz[i]);
+        nsd = nsd.append(A, sd[i]);
+        view_sizes = view_sizes.append(A, sz[i]);
+    }
+    // recompute positional indices
+    auto start = new_levels.size() - 1;
+    int npositional = 0;
+    for (auto i_ : new_levels.enumerate()) {
+        auto i = start - i_;
+        if (new_levels[i].is_positional() || new_levels[i].is_none()) {
+            new_levels[i] = -(++npositional);
+        }
+    }
+    at::Tensor ndata = data.as_strided(at::IntArrayRef(nsz.begin(), nsz.end()),
+                                       at::IntArrayRef(nsd.begin(), nsd.end()), data.storage_offset());
+    if (needs_view) {
+        ndata = ndata.reshape(at::IntArrayRef(view_sizes.begin(), view_sizes.end()));
+    }
+    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device_).release();
+    PY_END(nullptr)
+}
+
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
@@ -1489,6 +1587,7 @@ static PyMethodDef methods[] = {
     {"Tensor_from_batched", (PyCFunction) py_Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
     {"__torch_function__", (PyCFunction) __torch_function__, METH_FASTCALL | METH_KEYWORDS},
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
+    {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
@@ -1508,6 +1607,8 @@ PyMODINIT_FUNC PyInit__C(void) {
         Dim::ready(mod, "Dim");
         DimList::ready(mod, "DimList");
         Tensor::ready(mod, "Tensor");
+        Py_INCREF(&PyInstanceMethod_Type);
+        PyModule_AddObject(mod.ptr(), "_instancemethod", (PyObject *)&PyInstanceMethod_Type);
         return mod.release();
     } catch(py::exception_set& err) {
         return nullptr;
