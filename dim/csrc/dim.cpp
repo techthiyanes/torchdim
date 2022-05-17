@@ -36,6 +36,8 @@ py::handle DelayedMulTensor;
 py::handle NamedTuple;
 py::dict_view pointwise;
 py::handle torch_Tensor_expand;
+binaryfunc THPVariable_getitem;
+py::handle no_slice;
 
 static void maybeInitializeGlobals() {
     if (empty_dict.ptr()) {
@@ -50,6 +52,9 @@ static void maybeInitializeGlobals() {
     NamedTuple = py::import("typing").attr("NamedTuple");
     pointwise = dim.attr("pointwise");
     torch_Tensor_expand = torch.attr("Tensor").attr("expand");
+    auto TensorBase = (PyTypeObject*) torch.attr("_C").attr("_TensorBase").ptr();
+    THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
+    no_slice = PySlice_New(NULL, NULL, NULL);
 }
 
 py::handle DimensionBindError_;
@@ -654,7 +659,15 @@ struct TensorInfo {
     Slice<DimEntry> levels;
     bool has_device;
     TensorRef batchedtensor;
-
+    int64_t ndim() const {
+        int64_t r = 0;
+        for (auto l : levels) {
+            if (l.is_positional()) {
+                ++r;
+            }
+        }
+        return r;
+    }
     operator bool() const {
         return tensor;
     }
@@ -1033,20 +1046,22 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
 static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
     maybeInitializeGlobals();
     bool is_pointwise = pointwise.contains(orig);
-    std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
 
     if (orig == torch_Tensor___mul__) {
         AT_ASSERT(args_.size() == 2);
         if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args_[1]) == 0) {
+            std::cout << "__torch_function__ " << "delay" << " " << orig << "\n";
+
             return DelayedMulTensor.call_object(args_);
         }
     }
+    std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
+
     Slice<py::hdl<Dim>> all_dims;
     Slice<py::handle> flat_args;
     auto unflatten_args = tree_flatten(A, args_, flat_args);
     auto unflatten_kwargs = tree_flatten(A, kwargs_, flat_args);
     TensorRef device_holding_tensor;
-
 
     Slice<TensorInfo> infos;
     Slice<DimEntry> result_levels;
@@ -1623,6 +1638,307 @@ static PyObject* expand(PyObject *_,
     PY_END(nullptr)
 }
 
+
+void _bind_dims_to_size(Arena & A, int64_t sz, int64_t sd,
+                        Slice<py::hdl<Dim>> dims, Slice<int64_t>& nsz, Slice<int64_t>& nsd) {
+    int64_t rhs_prod = 1;
+    for (auto i : dims.enumerate()) {
+        if (!dims[i]->is_bound()) {
+            for (auto j : c10::irange(i + 1, dims.size())) {
+                if (!dims[j]->is_bound()) {
+                    py::raise_error(DimensionBindError(), "cannot infer the sizes of two dimensions at once %R and %R", dims[i].ptr(), dims[j].ptr());
+                }
+                rhs_prod *= dims[j]->size();
+            }
+            if (sz % rhs_prod != 0) {
+                py::tuple tup(dims.size());
+                for (auto j : dims.enumerate()) {
+                    tup.set(j, dims[j]->is_bound() ? py::from_int(dims[j]->size()) : py::unicode_from_string("?"));
+                }
+                py::raise_error(DimensionBindError(), "inferred dimension does not evenly fit into larger dimension: %d vs %R", sz, tup.ptr());
+            }
+            int64_t inferred_size = sz / rhs_prod;
+            dims[i]->set_size(inferred_size);
+            rhs_prod = sz;
+            break;
+        }
+        rhs_prod *= dims[i]->size();
+    }
+    if (rhs_prod != sz) {
+        py::tuple tup(dims.size());
+        for (auto j : dims.enumerate()) {
+            tup.set(j, py::object::borrow(dims[j]));
+        }
+        py::raise_error(DimensionBindError(), "Dimension sizes to do not match (%d != %d) when matching dimension pack %R", (int) sz, (int) rhs_prod, tup.ptr());
+    }
+    auto new_strides = A.allocate<int64_t>(dims.size());
+    auto prev_stride = sd;
+    for (auto i : dims.reversed_enumerate()) {
+        new_strides[i] = prev_stride;
+        prev_stride = dims[i]->size()*prev_stride;
+    }
+    for (auto i : dims.enumerate()) {
+        nsd = nsd.append(A, new_strides[i]);
+        nsz = nsz.append(A, dims[i]->size());
+    }
+}
+
+static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
+    maybeInitializeGlobals();
+    bool is_tuple = py::tuple_view::check(index);
+    if (!is_tuple && !py::isinstance(index, _Tensor)) {
+        py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+    }
+
+    Slice<py::handle> input;
+    if (!is_tuple) {
+        input = input.append(A, index);
+    } else {
+        py::tuple_view tv(index);
+        for (auto i : c10::irange(tv.size())) {
+            input = input.append(A, tv[i]);
+        }
+    }
+
+    bool can_call_original_getitem = !py::isinstance(self, _Tensor);
+    int64_t dims_indexed = 0;
+    int64_t expanding_object = -1;
+    DimList* unbound_dim_list = nullptr;
+    auto check_expanding = [&](int64_t i) {
+        if (expanding_object != -1) {
+            py::raise_error(DimensionBindError(), "at most one ... or unbound dimension list can exist in indexing list but found 2 at offsets %d and %d", (int) expanding_object, (int) i);
+        }
+        expanding_object = i;
+    };
+    Slice<int64_t> dimlists;
+
+    bool has_dimpacks_or_none = false;
+    for (auto i : input.enumerate()) {
+        py::handle s = input[i];
+        if (s.ptr() == Py_Ellipsis) {
+            check_expanding(i);
+        } else if (DimList::check(s)) {
+            can_call_original_getitem = false;
+            auto dl = DimList::unchecked_wrap(s);
+            if (!dl->is_bound()) {
+                check_expanding(i);
+                unbound_dim_list = dl.ptr();
+            } else {
+                dims_indexed += dl->dims_.size();
+            }
+            dimlists = dimlists.append(A, i);
+        } else if (py::is_none(s)) {
+            has_dimpacks_or_none = true;
+        }  else {
+            if (Dim::check(s)) {
+                can_call_original_getitem = false;
+            } else if (py::tuple_view::check(s)) {
+                // can we avoid rechecking?
+                py::tuple_view tv(s);
+                if (tv.size() && Dim::check(tv[0])) {
+                    can_call_original_getitem = false;
+                    has_dimpacks_or_none = true;
+                }
+            }
+            ++dims_indexed;
+        }
+    }
+    if (can_call_original_getitem) {
+        py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+    }
+    TensorInfo self_info = TensorInfo::create(A, self, false, true);
+    auto ndim = self_info.ndim();
+    if (dims_indexed > ndim) {
+        py::raise_error(PyExc_ValueError, "at least %d indices were supplied but the tensor only has %d dimensions", (int) dims_indexed, (int) ndim);
+    }
+    auto expanding_dims = ndim - dims_indexed;
+    if (expanding_object != -1) {
+        if (unbound_dim_list) {
+            unbound_dim_list->bind_len(expanding_dims);
+        } else {
+            // ...
+            Slice<py::handle> no_slices;
+            for (auto i : c10::irange(expanding_dims)) {
+                no_slices = no_slices.append(A, no_slice);
+            }
+            input = input.insert(A, input.slice(expanding_object, expanding_object + 1), no_slices);
+        }
+    }
+    for (auto i : dimlists.reversed_enumerate()) {
+        auto idx = dimlists[i];
+        // we add more elements to input, so we need to also adjust the index to get back to where the
+        // dimlist existed
+        if (!unbound_dim_list && expanding_object != -1 && idx > expanding_object) {
+            idx += expanding_dims;
+        }
+        auto dl = DimList::unchecked_wrap(input[idx]);
+        // XXX would be better if we used an OwnedSlice in DimList
+        Slice<py::handle> more_dims((py::handle*) &*dl->dims_.begin(), (py::handle*) &*dl->dims_.end());
+        input = input.insert(A, input.slice(idx, idx + 1), more_dims);
+    }
+
+    dims_indexed = 0;
+    Slice<py::hdl<Dim>> seen_dims;
+    Slice<int64_t> seen_dims_nuses;
+    auto add_dim = [&](py::hdl<Dim> entry) {
+        auto midx = seen_dims.index(entry);
+        if (!midx) {
+            seen_dims = seen_dims.append(A, entry);
+            seen_dims_nuses = seen_dims_nuses.append(A, 1);
+        } else {
+            ++seen_dims_nuses[*midx];
+        }
+    };
+
+    Slice<py::handle> input_it = input;
+    Slice<py::handle> flat_inputs;
+    // flat inputs will start with an empty py::handle if the
+    // actual value is in the tensor-like object in the tensor info
+    Slice<TensorInfo> tensor_inputs;
+
+    Slice<int64_t> nsz;
+    Slice<int64_t> nsd;
+    at::IntArrayRef sz = self_info.tensor->sizes();
+    at::IntArrayRef sd = self_info.tensor->strides();
+
+    auto append_size = [&](int i) {
+        if (has_dimpacks_or_none) {
+            nsz = nsz.append(A, sz[i]);
+            nsd = nsd.append(A, sd[i]);
+        }
+    };
+
+    for (auto i : self_info.levels.enumerate()) {
+        auto l = self_info.levels[i];
+        if (!l.is_positional()) {
+            add_dim(l.dim());
+            flat_inputs = flat_inputs.append(A, l.dim());
+            append_size(i);
+            continue;
+        }
+        while (input_it.size() && py::is_none(input_it[0])) {
+            flat_inputs = flat_inputs.append(A, no_slice);
+            nsz = nsz.append(A, 1);
+            nsd = nsd.append(A, 0);
+            input_it = input_it.slice(1);
+        }
+        if (!input_it.size()) {
+            flat_inputs = flat_inputs.append(A, no_slice);
+            append_size(i);
+            continue;
+        }
+        py::handle arg = input_it[0];
+        input_it = input_it.slice(1);
+        if (Dim::check(arg)) {
+            auto d = Dim::unchecked_wrap(arg);
+            d->set_size(sz[i]);
+            add_dim(d);
+            append_size(i);
+        } else if (py::tuple_view::check(arg)) {
+            py::tuple_view tv(arg);
+            if (tv.size() && Dim::check(tv[0])) {
+                // dim pack
+                Slice<py::hdl<Dim>> dim_pack;
+                for (auto j : c10::irange(tv.size())) {
+                    dim_pack = dim_pack.append(A, Dim::wrap(tv[j]));
+                    add_dim(dim_pack.back());
+                    flat_inputs = flat_inputs.append(A, dim_pack.back());
+                }
+                _bind_dims_to_size(sz[i], sd[i], dim_pack, nsz, nsd);
+            }
+        } else {
+            append_size(i);
+            TensorInfo info = TensorInfo::create(A, arg, false, false);
+            if (info) {
+                tensor_inputs = tensor_inputs.append(A, info);
+                flat_inputs = flat_inputs.append(A, py::handle());
+                for (auto il : info.levels) {
+                    if (!il.is_positional()) {
+                        add_dim(il.dim());
+                    }
+                }
+            } else {
+                flat_inputs = flat_inputs.append(A, arg);
+            }
+        }
+    }
+    if (has_dimpacks_or_none) {
+        self_info.tensor = A.autorelease(self_info.tensor->as_strided(at::IntArrayRef(nsz.begin(), nsz.end()),at::IntArrayRef(nsd.begin(), nsd.end()), self_info.tensor->storage_offset()));
+    }
+    Slice<DimEntry> result_levels;
+    Slice<DimEntry> index_levels;
+    int64_t tensor_insert_point = -1;
+    bool requires_getindex = false;
+    for (auto i : flat_inputs.enumerate()) {
+        auto inp = flat_inputs[i];
+         if (Dim::check(inp)) {
+            auto d = Dim::unchecked_wrap(inp);
+            if (1 == seen_dims_nuses[*seen_dims.index(d)]) {
+                flat_inputs[i] = no_slice;
+                result_levels = result_levels.append(A, d);
+            } else {
+                requires_getindex = true;
+                flat_inputs[i] = py::handle();
+                tensor_inputs[i] = TensorInfo {d->range(), Slice<DimEntry>(A, DimEntry(d)), false, TensorRef()};
+            }
+         } else if(tensor_inputs[i]) {
+             requires_getindex = true;
+             if (tensor_insert_point == -1) {
+                 tensor_insert_point = result_levels.size();
+             }
+             for (auto l : tensor_inputs[i].levels) {
+                 if (!result_levels.contains(l)) {
+                     result_levels = result_levels.append(A, l);
+                 }
+             }
+         } else {
+             requires_getindex = true;
+             if (!py::is_int(inp)) {
+                 result_levels = result_levels.append(A, 0);
+             }
+         }
+    }
+
+    if (tensor_insert_point != -1) {
+        result_levels = result_levels.insert(A, result_levels.slice(tensor_insert_point, tensor_insert_point), index_levels);
+    }
+
+    for (auto i : flat_inputs.enumerate()) {
+        if (tensor_inputs[i]) {
+            AT_ASSERT(!flat_inputs[i].ptr());
+            flat_inputs[i] = handle_from_tensor(A, _match_levels(A, tensor_inputs[i].tensor, tensor_inputs[i].levels, result_levels));
+        }
+    }
+
+    auto seen_positionals = 0;
+    for (auto i : result_levels.reversed_enumerate()) {
+        if (result_levels[i].is_positional()) {
+            result_levels[i] = -(++seen_positionals);
+        }
+    }
+
+    at::Tensor rtensor;
+    if (requires_getindex) {
+        auto tup = slice_to_tuple(flat_inputs);
+        auto pytensor = py::object::checked_steal(THPVariable_getitem(handle_from_tensor(A, self_info.tensor).ptr(), tup.ptr()));
+        rtensor = THPVariable_Unpack(pytensor.ptr());
+    } else {
+        rtensor = *self_info.tensor;
+    }
+    return Tensor_from_positional(A, std::move(rtensor), result_levels, self_info.has_device);
+}
+
+static PyObject* py___getitem__(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    AT_ASSERT(nargs == 2);
+    return __getitem__(A, args[0], args[1]).release();
+    PY_END(nullptr)
+}
+
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
@@ -1634,6 +1950,7 @@ static PyMethodDef methods[] = {
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
+    {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
