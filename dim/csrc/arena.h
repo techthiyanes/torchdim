@@ -52,18 +52,18 @@ struct Slice {
         return index(value).has_value();
     }
 
-    Slice insert(Arena& arena, Slice where, Slice to_insert);
-    Slice insert(Arena& arena, Slice where, T v) {
+    void insert(Arena& arena, Slice where, Slice to_insert);
+    void insert(Arena& arena, Slice where, T v) {
         return insert(arena, where, Slice(&v, &v + 1));
     }
-    Slice insert(Arena& arena, int where, T v) {
+    void insert(Arena& arena, int where, T v) {
         return insert(arena, slice(where, where), v);
     }
-    Slice append(Arena& arena, T value);
-    Slice extend(Arena& arena, Slice to_insert) {
+    void append(Arena& arena, T value);
+    void extend(Arena& arena, Slice to_insert) {
         return insert(arena, slice(size_), to_insert);
     }
-    Slice extend(Arena& arena, const T* begin, const T* end) {
+    void extend(Arena& arena, const T* begin, const T* end) {
         return extend(arena, Slice<T>((T*)begin, (T*)end));
     }
 
@@ -208,11 +208,11 @@ struct Arena {
     TensorRef autorelease(at::Tensor s) {
         auto ref = TensorRef(s);
         s.unsafeReleaseTensorImpl();
-        ar_tensors_ = ar_tensors_.append(*this, ref);
+        ar_tensors_.append(*this, ref);
         return ref;
     }
     py::handle autorelease(py::object obj) {
-        ar_objects_ = ar_objects_.append(*this, obj);
+        ar_objects_.append(*this, obj);
         obj.release();
         return ar_objects_.back();
     }
@@ -232,7 +232,7 @@ private:
 };
 
 template<typename T>
-inline Slice<T> Slice<T>::insert(Arena& arena, Slice where, Slice to_insert) {
+inline void Slice<T>::insert(Arena& arena, Slice where, Slice to_insert) {
     AT_ASSERT(inside(where));
     Slice result = *this;
     /// b------sb---se-----e,  0----n
@@ -253,11 +253,11 @@ inline Slice<T> Slice<T>::insert(Arena& arena, Slice where, Slice to_insert) {
     }
 
     std::memcpy(body_dest, to_insert.begin(), sizeof(T)*to_insert.size());
-    return result;
+    *this = result;
 }
 
 template<typename T>
-inline Slice<T> Slice<T>::append(Arena& arena, T value) {
+inline void Slice<T>::append(Arena& arena, T value) {
     Slice result = *this;
     if (size_ == capacity_) {
         int new_size = size_ ? round2(size_)*2 : 8;
@@ -267,7 +267,7 @@ inline Slice<T> Slice<T>::append(Arena& arena, T value) {
         result.capacity_ = new_size;
     }
     result[result.size_++] = std::move(value);
-    return result;
+    *this = result;
 }
 
 template<typename T>

@@ -1,13 +1,13 @@
 #include "minpybind.h"
-// #include <frameobject.h>
-// #include <opcode.h>
-// #include <utility>
-// #include <new>
-// #include <iostream>
-// #include <vector>
-// #include <torch/csrc/autograd/python_variable.h>
-// #include <functorch/csrc/BatchedTensorImpl.h>
-// #include <ATen/ATen.h>
+#include <frameobject.h>
+#include <opcode.h>
+#include <utility>
+#include <new>
+#include <iostream>
+#include <vector>
+#include <torch/csrc/autograd/python_variable.h>
+#include <functorch/csrc/BatchedTensorImpl.h>
+#include <ATen/ATen.h>
 #include "arena.h"
 
 
@@ -606,7 +606,8 @@ public:
 };
 
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
-    auto levels = Slice<DimEntry>().extend(A, levels_);
+    auto levels = Slice<DimEntry>();
+    levels.extend(A, levels_);
     while (true) {
         int min_real_index = -1;
         int min_index = -1;
@@ -680,7 +681,7 @@ struct TensorInfo {
             TensorRef t = unchecked_tensor_from(h);
             Slice<DimEntry> levels;
             for (auto i : c10::irange(-t->dim(), 0)) {
-                levels = levels.append(A, i);
+                levels.append(A, i);
             }
             return TensorInfo {t, levels, true, t};
         } else if (Dim::check(h)) {
@@ -701,14 +702,14 @@ struct TensorInfo {
     static TensorInfo create(Arena& A, TensorRef batchedtensor, bool has_device) {
         Slice<DimEntry> levels;
         for (auto i : c10::irange(-batchedtensor->dim(), 0)) {
-            levels = levels.append(A, i);
+            levels.append(A, i);
         }
         TensorRef tensor;
         at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(*batchedtensor);
         while(true) {
             auto level = impl->level() - LEVEL_OFFSET;
             py::hdl<Dim> dim = (Dim*) levels_in_use[level].ptr();
-            levels = levels.insert(A, impl->bdim(), dim);
+            levels.insert(A, impl->bdim(), dim);
             at::functorch::BatchedTensorImpl * nimpl = maybeGetBatchedImpl(impl->value());
             if (!nimpl) {
                 tensor = impl->value();
@@ -805,11 +806,11 @@ static PyObject* py_Tensor_from_positional(PyObject *self,
         py::object v = sq[i];
         if (py::is_int(v)) {
             auto vi = py::to_int(v);
-            levels = levels.append(A, vi);
+            levels.append(A, vi);
         } else {
             auto dim = Dim::wrap(std::move(v));
             py::hdl<Dim> hdim = dim;
-            levels = levels.append(A, hdim);
+            levels.append(A, hdim);
         }
     }
     return Tensor_from_positional(A, THPVariable_Unpack(tensor.ptr()), levels, has_device != 0).release();
@@ -880,7 +881,7 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
         utype = U_TUPLE_LIKE;
         py::list_view l(agg);
         for (auto i : c10::irange(l.size())) {
-            c = c.append(A, tree_flatten(A, l[i], flat_elements));
+            c.append(A, tree_flatten(A, l[i], flat_elements));
         }
     } else if (py::tuple_view::check(agg)) {
         obj = agg.type();
@@ -888,7 +889,7 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
         // includes named tuples
         py::tuple_view l(agg);
         for (auto i : c10::irange(l.size())) {
-            c = c.append(A, tree_flatten(A, l[i], flat_elements));
+            c.append(A, tree_flatten(A, l[i], flat_elements));
         }
     } else if (py::dict_view::check(agg)) {
         utype = U_DICT;
@@ -897,11 +898,11 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
         Py_ssize_t pos = 0;
         py::handle k, v;
         while (d.next(&pos, &k, &v)) {
-            c = c.append(A, tree_flatten(A, v, flat_elements));
+            c.append(A, tree_flatten(A, v, flat_elements));
         }
     } else {
         utype = U_ELEM;
-        flat_elements = flat_elements.append(A, agg);
+        flat_elements.append(A, agg);
     }
     return Unflatten {utype, obj, c};
 }
@@ -927,7 +928,7 @@ static PyObject* py_unflatten(PyObject *self,
     auto inputs = Tuple.call(ns);
     py::tuple_view tv(inputs);
     for (auto i : c10::irange(tv.size())) {
-        slice = slice.append(A, tv[i]);
+        slice.append(A, tv[i]);
     }
     auto AA = (UnflattenArena*) PyCapsule_GetPointer(self, "arena");
     auto r = AA->unflatten(slice).release();
@@ -1031,12 +1032,12 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
     for (auto l : to_levels) {
         auto oidx = from_levels.index(l);
         if (!oidx) {
-            nsz = nsz.append(A, l.is_positional() ? 1 : l.dim()->size());
-            nsd = nsd.append(A, 0);
+            nsz.append(A, l.is_positional() ? 1 : l.dim()->size());
+            nsd.append(A, 0);
         } else {
             auto idx = *oidx;
-            nsz = nsz.append(A, sz[idx]);
-            nsd = nsd.append(A, sd[idx]);
+            nsz.append(A, sz[idx]);
+            nsd.append(A, sd[idx]);
         }
     }
     return A.autorelease(v->as_strided(at::IntArrayRef(nsz.begin(), nsz.end()), at::IntArrayRef(nsd.begin(), nsd.end()), v->storage_offset()));
@@ -1066,7 +1067,7 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
     Slice<TensorInfo> infos;
     Slice<DimEntry> result_levels;
     for (auto f : flat_args) {
-        infos = infos.append(A, TensorInfo::create(A, f, !is_pointwise, false));
+        infos.append(A, TensorInfo::create(A, f, !is_pointwise, false));
         if (infos.back()) {
             TensorInfo& info = infos.back();
             AT_ASSERT(is_pointwise || info.batchedtensor);
@@ -1075,7 +1076,7 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
             }
             for (auto l : info.levels) {
                 if (!result_levels.contains(l)) {
-                    result_levels = result_levels.append(A, l);
+                    result_levels.append(A, l);
                 }
             }
         }
@@ -1439,10 +1440,10 @@ static PyObject* test_c(PyObject *self,
     Slice<int> s(A, 3, 4, 5);
     AT_ASSERT(s.size() == 3 && s.capacity() == 8);
     AT_ASSERT(s[0] == 3 && s[1] == 4 && s[2] == 5);
-    s = s.append(A, 6);
+    s.append(A, 6);
     AT_ASSERT(s[3] == 6);
     for(int i : c10::irange(10)) {
-        s = s.append(A, i);
+        s.append(A, i);
     }
     AT_ASSERT(s[0] == 3 && s.back() == 9 && s.size() == 14 && s.capacity() == 16);
 
@@ -1453,23 +1454,23 @@ static PyObject* test_c(PyObject *self,
     AT_ASSERT(ss.size() == 1);
     AT_ASSERT(ss[0] == 4);
     AT_ASSERT(ss.capacity() == 1);
-    ss = ss.append(A, -4);
+    ss.append(A, -4);
     AT_ASSERT(ss.size() == 2 && ss[1] == -4);
     ss[0] = 3;
     AT_ASSERT(s[1] == 4);
 
-    s = s.insert(A, s.slice(1, 4), ss);
+    s.insert(A, s.slice(1, 4), ss);
     AT_ASSERT(s[1] == 3  && s[2] == -4 && s[3] == 0);
 
     auto sz = s.size();
-    s = s.insert(A, s.slice(1, 1), 4);
+    s.insert(A, s.slice(1, 1), 4);
     AT_ASSERT(s[1] == 4 && sz + 1 == s.size());
 
 
     Slice<int> d(A, 0, 1, 2, 3, 4);
 
     Slice<int> b(A, 0, 1, 2, 3, 4);
-    b = b.insert(A, b.slice(1,1), d);
+    b.insert(A, b.slice(1,1), d);
     AT_ASSERT(b.size() == 10);
     AT_ASSERT(b[1] == 0);
     AT_ASSERT(b[5] == 4);
@@ -1514,7 +1515,8 @@ static PyObject* positional(PyObject *_,
     AT_ASSERT(nargs-- > 0);
     auto self = Tensor::wrap(args++[0]);
     at::Tensor& data = self->tensor_;
-    auto levels = Slice<DimEntry>().extend(A, self->levels_.slice());
+    auto levels = Slice<DimEntry>();
+    levels.extend(A, self->levels_.slice());
 
 
     at::IntArrayRef sz = data.sizes();
@@ -1534,13 +1536,13 @@ static PyObject* positional(PyObject *_,
         }
         auto idx = *midx;
         levels[idx] = DimEntry();
-        nsz = nsz.append(A, sz[idx]);
-        nsd = nsd.append(A, sd[idx]);
+        nsz.append(A, sz[idx]);
+        nsd.append(A, sd[idx]);
     };
     auto append_level = [&](int64_t sz) {
-        view_sizes = view_sizes.append(A, sz);
+        view_sizes.append(A, sz);
         // we will recalculate the positional indices when we know how many were created
-        new_levels = new_levels.append(A, DimEntry());
+        new_levels.append(A, DimEntry());
     };
 
     bool needs_view = false;
@@ -1576,10 +1578,10 @@ static PyObject* positional(PyObject *_,
         auto & l = levels[i];
         if (l.is_none())
             continue;
-        new_levels = new_levels.append(A, l);
-        nsz = nsz.append(A, sz[i]);
-        nsd = nsd.append(A, sd[i]);
-        view_sizes = view_sizes.append(A, sz[i]);
+        new_levels.append(A, l);
+        nsz.append(A, sz[i]);
+        nsd.append(A, sd[i]);
+        view_sizes.append(A, sz[i]);
     }
     // recompute positional indices
     auto start = new_levels.size() - 1;
@@ -1624,15 +1626,15 @@ static PyObject* expand(PyObject *_,
         if (levels.contains(d) || new_levels.contains(d)) {
             py::raise_error(DimensionBindError(), "expanding dimension %R already exists in tensor with dims", d.ptr());
         }
-        new_levels = new_levels.append(A, d);
-        sz = sz.append(A, d->size());
-        sd = sd.append(A, 0);
+        new_levels.append(A, d);
+        sz.append(A, d->size());
+        sd.append(A, 0);
     }
-    new_levels = new_levels.extend(A, levels);
+    new_levels.extend(A, levels);
     at::IntArrayRef osz = data.sizes();
     at::IntArrayRef osd = data.strides();
-    sz = sz.extend(A, osz.begin(), osz.end());
-    sd = sd.extend(A, osd.begin(), osd.end());
+    sz.extend(A, osz.begin(), osz.end());
+    sd.extend(A, osd.begin(), osd.end());
     at::Tensor ndata = data.as_strided(at::IntArrayRef(sz.begin(), sz.end()), at::IntArrayRef(sd.begin(), sd.end()), data.storage_offset());
     return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device_).release();
     PY_END(nullptr)
@@ -1678,8 +1680,8 @@ void _bind_dims_to_size(Arena & A, int64_t sz, int64_t sd,
         prev_stride = dims[i]->size()*prev_stride;
     }
     for (auto i : dims.enumerate()) {
-        nsd = nsd.append(A, new_strides[i]);
-        nsz = nsz.append(A, dims[i]->size());
+        nsd.append(A, new_strides[i]);
+        nsz.append(A, dims[i]->size());
     }
 }
 
@@ -1697,11 +1699,11 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
 
     Slice<py::handle> input;
     if (!is_tuple) {
-        input = input.append(A, index);
+        input.append(A, index);
     } else {
         py::tuple_view tv(index);
         for (auto i : c10::irange(tv.size())) {
-            input = input.append(A, tv[i]);
+            input.append(A, tv[i]);
         }
     }
 
@@ -1734,7 +1736,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             } else {
                 dims_indexed += dl->dims_.size();
             }
-            dimlists = dimlists.append(A, i);
+            dimlists.append(A, i);
         } else if (py::is_none(s)) {
             has_dimpacks_or_none = true;
         }  else {
@@ -1774,9 +1776,9 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             Slice<py::handle> no_slices;
             for (auto i : c10::irange(expanding_dims)) {
                 (void) i;
-                no_slices = no_slices.append(A, no_slice);
+                no_slices.append(A, no_slice);
             }
-            input = input.insert(A, input.slice(expanding_object, expanding_object + 1), no_slices);
+            input.insert(A, input.slice(expanding_object, expanding_object + 1), no_slices);
         }
     }
 
@@ -1794,7 +1796,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         // XXX would be better if we used an OwnedSlice in DimList
         Slice<py::handle> more_dims((py::handle*) &*dl->dims_.begin(), (py::handle*) &*dl->dims_.end());
         std::cout << "INSERTING " << more_dims << " into " << input << "\n";
-        input = input.insert(A, input.slice(idx, idx + 1), more_dims);
+        input.insert(A, input.slice(idx, idx + 1), more_dims);
         std::cout << "AFTER " << input << "\n";
     }
 
@@ -1812,8 +1814,8 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     auto add_dim = [&](py::hdl<Dim> entry) {
         auto midx = seen_dims.index(entry);
         if (!midx) {
-            seen_dims = seen_dims.append(A, entry);
-            seen_dims_nuses = seen_dims_nuses.append(A, 1);
+            seen_dims.append(A, entry);
+            seen_dims_nuses.append(A, 1);
         } else {
             ++seen_dims_nuses[*midx];
         }
@@ -1827,12 +1829,12 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     Slice<TensorInfo> tensor_inputs;
 
     auto append_flat_handle = [&](py::handle h) {
-        flat_inputs = flat_inputs.append(A, h);
-        tensor_inputs = tensor_inputs.append(A, TensorInfo());
+        flat_inputs.append(A, h);
+        tensor_inputs.append(A, TensorInfo());
     };
     auto append_tensor_input = [&](TensorInfo ti) {
-        flat_inputs = flat_inputs.append(A, py::handle());
-        tensor_inputs = tensor_inputs.append(A, ti);
+        flat_inputs.append(A, py::handle());
+        tensor_inputs.append(A, ti);
     };
 
     Slice<int64_t> nsz;
@@ -1842,8 +1844,8 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
 
     auto append_size = [&](int i) {
         if (has_dimpacks_or_none) {
-            nsz = nsz.append(A, sz[i]);
-            nsd = nsd.append(A, sd[i]);
+            nsz.append(A, sz[i]);
+            nsd.append(A, sd[i]);
         }
     };
     std::cout << "self levels: " << self_info.levels << "\n";
@@ -1851,8 +1853,8 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     auto parse_nones = [&]() {
         while (input_it.size() && py::is_none(input_it[0])) {
             append_flat_handle(no_slice);
-            nsz = nsz.append(A, 1);
-            nsd = nsd.append(A, 0);
+            nsz.append(A, 1);
+            nsd.append(A, 0);
             input_it = input_it.slice(1);
         }
     };
@@ -1891,7 +1893,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
                 // dim pack
                 Slice<py::hdl<Dim>> dim_pack;
                 for (auto j : c10::irange(tv.size())) {
-                    dim_pack = dim_pack.append(A, Dim::wrap(tv[j]));
+                    dim_pack.append(A, Dim::wrap(tv[j]));
                     add_dim(dim_pack.back());
                     append_flat_handle(dim_pack.back());
                 }
@@ -1941,7 +1943,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
              for (auto l : tensor_inputs[i].levels) {
                  std::cout << "Consider to add " << l << "\n";
                  if (!index_levels.contains(l)) {
-                     index_levels = index_levels.append(A, l);
+                     index_levels.append(A, l);
                  }
              }
         } else if (Dim::check(inp)) {
@@ -1949,7 +1951,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             // dimesions used once are just binding operations
             if (1 == seen_dims_nuses[*seen_dims.index(d)]) {
                 flat_inputs[i] = no_slice;
-                result_levels = result_levels.append(A, d);
+                result_levels.append(A, d);
             } else {
                 requires_getindex = true;
                 flat_inputs[i] = py::handle();
@@ -1961,7 +1963,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             }
             if (!py::is_int(inp)) {
                 // note: actual positional indexes are accurately computed later
-                result_levels = result_levels.append(A, -1);
+                result_levels.append(A, -1);
             }
          }
     }
@@ -1969,7 +1971,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     // indexing dimensions appear in the tensor at the _first use of a tensor_ in the indexing. So insert
     // the indexing leveles into the result klevels at this spot
     if (tensor_insert_point != -1) {
-        result_levels = result_levels.insert(A, result_levels.slice(tensor_insert_point, tensor_insert_point), index_levels);
+        result_levels.insert(A, result_levels.slice(tensor_insert_point, tensor_insert_point), index_levels);
     }
 
     std::cout << "flat inputs: " << flat_inputs << "\n";
