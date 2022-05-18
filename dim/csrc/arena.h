@@ -92,9 +92,9 @@ struct Slice {
     c10::integer_range<int> enumerate() const {
         return c10::irange(size_);
     }
-    c10::integer_range<int> reversed_enumerate() const {
-        return c10::irange(size_ - 1, -1);
-    }
+    // c10::integer_range<int> reversed_enumerate() const {
+    //     return c10::irange(size_ - 1, -1);
+    // }
 
     bool operator==(const Slice<T>& rhs) const {
         if (size() != rhs.size()) {
