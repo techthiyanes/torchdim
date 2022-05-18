@@ -7,6 +7,34 @@
 #define PY_BEGIN try {
 #define PY_END(v) } catch(py::exception_set & err) { return (v); }
 
+struct irange {
+ public:
+    irange(int64_t end)
+    : irange(0, end, 1) {}
+    irange(int64_t begin, int64_t end, int64_t step = 1)
+    : begin_(begin), end_(end), step_(step) {}
+    int64_t operator*() const {
+        return begin_;
+    }
+    irange& operator++() {
+        begin_ += step_;
+        return *this;
+    }
+    bool operator!=(const irange& other) {
+        return begin_ != other.begin_;
+    }
+    irange begin() {
+        return *this;
+    }
+    irange end() {
+        return irange {end_, end_, step_};
+    }
+ private:
+    int64_t begin_;
+    int64_t end_;
+    int64_t step_;
+};
+
 namespace py {
 
 struct exception_set {
@@ -305,6 +333,9 @@ struct sequence_view : public handle {
         }
         return r;
     }
+    irange enumerate() const {
+        return irange(size());
+    }
     static sequence_view wrap(handle h) {
         if (!is_sequence(h)) {
             raise_error(PyExc_ValueError, "expected a sequence");
@@ -384,12 +415,19 @@ inline std::ostream& operator<<(std::ostream& ss, handle h) {
 struct tuple_view : public handle {
     tuple_view() = default;
     tuple_view(handle h) : handle(h) {}
+
     Py_ssize_t size() const {
         return PyTuple_GET_SIZE(ptr());
     }
+
+    irange enumerate() const {
+        return irange(size());
+    }
+
     handle operator[](Py_ssize_t i) {
         return PyTuple_GET_ITEM(ptr(), i);
     }
+
     static bool check(handle h) {
         return PyTuple_Check(h.ptr());
     }
@@ -401,6 +439,11 @@ struct list_view : public handle {
     Py_ssize_t size() const {
         return PyList_GET_SIZE(ptr());
     }
+
+    irange enumerate() const {
+        return irange(size());
+    }
+
     handle operator[](Py_ssize_t i) {
         return PyList_GET_ITEM(ptr(), i);
     }

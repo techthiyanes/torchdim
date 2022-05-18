@@ -89,12 +89,13 @@ struct Slice {
         return begin() <= where.begin() && where.end() <= end();
     }
 
-    c10::integer_range<int> enumerate() const {
-        return c10::irange(size_);
+    irange enumerate() const {
+        return irange(size_);
     }
-    // c10::integer_range<int> reversed_enumerate() const {
-    //     return c10::irange(size_ - 1, -1);
-    // }
+
+    irange reversed_enumerate() const {
+        return irange(size_ - 1, -1, -1);
+    }
 
     bool operator==(const Slice<T>& rhs) const {
         if (size() != rhs.size()) {

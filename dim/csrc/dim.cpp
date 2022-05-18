@@ -317,7 +317,7 @@ static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op) {
             Py_RETURN_RICHCOMPARE( (void*)self, (void*) other, op);
         } else {
             if (!rich_comparison_fns[0].ptr()) {
-                for (auto i : c10::irange(6)) {
+                for (auto i : irange(6)) {
                     auto r = py::import("dim").attr("_Tensor");
                     rich_comparison_fns[i] = r.attr(rich_comparison_table[i]);
                 }
@@ -680,7 +680,7 @@ struct TensorInfo {
         } else if (THPVariable_Check(h.ptr())) {
             TensorRef t = unchecked_tensor_from(h);
             Slice<DimEntry> levels;
-            for (auto i : c10::irange(-t->dim(), 0)) {
+            for (auto i : irange(-t->dim(), 0)) {
                 levels.append(A, i);
             }
             return TensorInfo {t, levels, true, t};
@@ -701,7 +701,7 @@ struct TensorInfo {
 
     static TensorInfo create(Arena& A, TensorRef batchedtensor, bool has_device) {
         Slice<DimEntry> levels;
-        for (auto i : c10::irange(-batchedtensor->dim(), 0)) {
+        for (auto i : irange(-batchedtensor->dim(), 0)) {
             levels.append(A, i);
         }
         TensorRef tensor;
@@ -802,7 +802,7 @@ static PyObject* py_Tensor_from_positional(PyObject *self,
 
     Slice<DimEntry> levels;
     py::sequence_view sq(py_levels);
-    for (auto i : c10::irange(sq.size())) {
+    for (auto i : sq.enumerate()) {
         py::object v = sq[i];
         if (py::is_int(v)) {
             auto vi = py::to_int(v);
@@ -880,7 +880,7 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
         obj = agg.type();
         utype = U_TUPLE_LIKE;
         py::list_view l(agg);
-        for (auto i : c10::irange(l.size())) {
+        for (auto i : l.enumerate()) {
             c.append(A, tree_flatten(A, l[i], flat_elements));
         }
     } else if (py::tuple_view::check(agg)) {
@@ -888,7 +888,7 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
         utype = U_TUPLE_LIKE;
         // includes named tuples
         py::tuple_view l(agg);
-        for (auto i : c10::irange(l.size())) {
+        for (auto i : l.enumerate()) {
             c.append(A, tree_flatten(A, l[i], flat_elements));
         }
     } else if (py::dict_view::check(agg)) {
@@ -927,7 +927,7 @@ static PyObject* py_unflatten(PyObject *self,
     py::handle Tuple = (PyObject*) &PyTuple_Type;
     auto inputs = Tuple.call(ns);
     py::tuple_view tv(inputs);
-    for (auto i : c10::irange(tv.size())) {
+    for (auto i : tv.enumerate()) {
         slice.append(A, tv[i]);
     }
     auto AA = (UnflattenArena*) PyCapsule_GetPointer(self, "arena");
@@ -1442,7 +1442,7 @@ static PyObject* test_c(PyObject *self,
     AT_ASSERT(s[0] == 3 && s[1] == 4 && s[2] == 5);
     s.append(A, 6);
     AT_ASSERT(s[3] == 6);
-    for(int i : c10::irange(10)) {
+    for(int i : irange(10)) {
         s.append(A, i);
     }
     AT_ASSERT(s[0] == 3 && s.back() == 9 && s.size() == 14 && s.capacity() == 16);
@@ -1546,7 +1546,7 @@ static PyObject* positional(PyObject *_,
     };
 
     bool needs_view = false;
-    for (auto i : c10::irange(nargs)) {
+    for (auto i :irange(nargs)) {
         py::handle arg  = args[i];
         if (DimList::check(arg)) {
             auto dl = DimList::unchecked_wrap(arg);
@@ -1565,7 +1565,7 @@ static PyObject* positional(PyObject *_,
             }
             py::sequence_view sq(arg);
             int64_t new_size = 1;
-            for (auto j : c10::irange(sq.size())) {
+            for (auto j : sq.enumerate()) {
                 py::obj<Dim> d = Dim::wrap(sq[j]);
                 append(d);
                 new_size *= d->size();
@@ -1609,7 +1609,7 @@ static PyObject* expand(PyObject *_,
     PY_BEGIN
     AT_ASSERT(nargs-- > 0);
     auto self = Tensor::wrap(args++[0]);
-    for (auto i : c10::irange(nargs)) {
+    for (auto i : irange(nargs)) {
         if (!Dim::check(args[i])) {
             maybeInitializeGlobals();
             auto newargs = slice_to_tuple(Slice<py::handle>((py::handle*)args - 1, (py::handle*)args + nargs));
@@ -1621,7 +1621,7 @@ static PyObject* expand(PyObject *_,
     Slice<DimEntry> new_levels;
     Slice<int64_t> sz;
     Slice<int64_t> sd;
-    for (auto i : c10::irange(nargs)) {
+    for (auto i : irange(nargs)) {
         auto d = Dim::unchecked_wrap(args[i]);
         if (levels.contains(d) || new_levels.contains(d)) {
             py::raise_error(DimensionBindError(), "expanding dimension %R already exists in tensor with dims", d.ptr());
@@ -1646,7 +1646,7 @@ void _bind_dims_to_size(Arena & A, int64_t sz, int64_t sd,
     int64_t rhs_prod = 1;
     for (auto i : dims.enumerate()) {
         if (!dims[i]->is_bound()) {
-            for (auto j : c10::irange(i + 1, dims.size())) {
+            for (auto j : irange(i + 1, dims.size())) {
                 if (!dims[j]->is_bound()) {
                     py::raise_error(DimensionBindError(), "cannot infer the sizes of two dimensions at once %R and %R", dims[i].ptr(), dims[j].ptr());
                 }
@@ -1675,7 +1675,7 @@ void _bind_dims_to_size(Arena & A, int64_t sz, int64_t sd,
     }
     auto new_strides = A.allocate<int64_t>(dims.size());
     auto prev_stride = sd;
-    for (int64_t i = dims.size() - 1; i >= 0; --i) {
+    for (auto i : dims.reversed_enumerate()) {
         new_strides[i] = prev_stride;
         prev_stride = dims[i]->size()*prev_stride;
     }
@@ -1702,7 +1702,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         input.append(A, index);
     } else {
         py::tuple_view tv(index);
-        for (auto i : c10::irange(tv.size())) {
+        for (auto i : tv.enumerate()) {
             input.append(A, tv[i]);
         }
     }
@@ -1774,7 +1774,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         } else {
             // ...
             Slice<py::handle> no_slices;
-            for (auto i : c10::irange(expanding_dims)) {
+            for (auto i : irange(expanding_dims)) {
                 (void) i;
                 no_slices.append(A, no_slice);
             }
@@ -1892,7 +1892,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             if (tv.size() && Dim::check(tv[0])) {
                 // dim pack
                 Slice<py::hdl<Dim>> dim_pack;
-                for (auto j : c10::irange(tv.size())) {
+                for (auto j : tv.enumerate()) {
                     dim_pack.append(A, Dim::wrap(tv[j]));
                     add_dim(dim_pack.back());
                     append_flat_handle(dim_pack.back());
@@ -1992,7 +1992,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     // previously we didn't know how many positional dimensions there would be so we couldn't number them right
     // so fill it in now.
     auto seen_positionals = 0;
-    for (int64_t i = result_levels.size() - 1; i >= 0; i--) {
+    for (auto i : result_levels.reversed_enumerate()) {
         if (result_levels[i].is_positional()) {
             result_levels[i] = -(++seen_positionals);
         }
