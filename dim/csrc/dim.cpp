@@ -587,14 +587,31 @@ static int DimList_init(DimList *self, PyObject *args, PyObject *kwds) {
 // Tensor -----------------------------
 
 PyTypeObject* TensorType = nullptr; // the python wrapper type.
+at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_);
 
 struct Tensor : public py::base<Tensor> {
-public:
+private:
     at::Tensor tensor_;
     at::Tensor batchtensor_;
     OwnedSlice<DimEntry> levels_;
     bool has_device_;
-
+public:
+    at::Tensor& tensor() {
+        return tensor_;
+    }
+    at::Tensor& batchtensor(Arena& A) {
+        if (!batchtensor_.defined()) {
+            std::cout << "CREATING BATCH TENSOR!\n";
+            batchtensor_ = _add_batch_dims(A, tensor_, levels_.slice());
+        }
+        return batchtensor_;
+    }
+    Slice<DimEntry> levels() {
+        return levels_.slice();
+    }
+    bool has_device() {
+        return has_device_;
+    }
     static PyTypeObject Type;
 
     static py::obj<Tensor> create() {
@@ -603,6 +620,8 @@ public:
         }
         return Tensor::alloc(TensorType);
     }
+    friend py::obj<Tensor> Tensor_from_batched(Arena& A, at::Tensor batched, bool has_device);
+    friend py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device);
 };
 
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
@@ -676,7 +695,7 @@ struct TensorInfo {
     static TensorInfo create(Arena& A, py::handle h, bool ensure_batched=true, bool ensure_present=true) {
         if (Tensor::check(h)) {
             auto t = Tensor::unchecked_wrap(h);
-            return TensorInfo {t->tensor_, t->levels_.slice(), t->has_device_, t->batchtensor_};
+            return TensorInfo {t->tensor(), t->levels(), t->has_device(), ensure_batched ? t->batchtensor(A) : TensorRef()};
         } else if (THPVariable_Check(h.ptr())) {
             TensorRef t = unchecked_tensor_from(h);
             Slice<DimEntry> levels;
@@ -721,7 +740,7 @@ struct TensorInfo {
     }
 };
 
-static py::obj<Tensor> Tensor_from_batched(Arena& A, at::Tensor batched, bool has_device) {
+py::obj<Tensor> Tensor_from_batched(Arena& A, at::Tensor batched, bool has_device) {
     TensorInfo info = TensorInfo::create(A, batched, has_device != 0);
     py::obj<Tensor> self = Tensor::create();
     // grab ownership of the tensors
@@ -758,7 +777,7 @@ static PyObject* py_Tensor_from_batched(PyObject *self,
 }
 
 
-static py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
+py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
     size_t seen_dims = 0;
     int last = 0;
     for (auto l : levels) {
@@ -780,7 +799,6 @@ static py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<Dim
     AT_ASSERT(self->tensor_.dim() == levels.size());
     self->levels_.set(levels, free_levels_dims);
     self->has_device_ = has_device;
-    self->batchtensor_ = _add_batch_dims(A, self->tensor_, self->levels_.slice());
     py::object r = std::move(self);
     return r;
 }
@@ -978,7 +996,7 @@ py::object tree_map(Arena& A, std::function<py::handle(py::handle)> fn, py::hand
 inline int64_t _Tensor_ndim(py::handle h) {
     if (Tensor::check(h)) {
         int64_t r = 0;
-        for (auto l : Tensor::unchecked_wrap(h)->levels_.slice()) {
+        for (auto l : Tensor::unchecked_wrap(h)->levels()) {
             if (l.is_positional()) {
                 ++r;
             }
@@ -1042,6 +1060,7 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
     }
     return A.autorelease(v->as_strided(at::IntArrayRef(nsz.begin(), nsz.end()), at::IntArrayRef(nsd.begin(), nsd.end()), v->storage_offset()));
 }
+
 
 
 static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
@@ -1158,12 +1177,14 @@ py::object levels_to_tuple(Slice<DimEntry> slice) {
 }
 
 static PyGetSetDef Tensor_getsetters[] = {
-   {"_has_device", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_bool(((Tensor*)self)->has_device_).release(); }, NULL},
-   {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->tensor_); }, NULL},
-   {"_batchtensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->batchtensor_); }, NULL},
+   {"_has_device", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_bool(((Tensor*)self)->has_device()).release(); }, NULL},
+   {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->tensor()); }, NULL},
+   {"_batchtensor", (getter) [](PyObject* self, void*) -> PyObject* {
+       Arena A;
+       return THPVariable_Wrap(((Tensor*)self)->batchtensor(A)); }, NULL},
    {"_levels", (getter) [](PyObject* self, void*) -> PyObject* {
        PY_BEGIN
-       return levels_to_tuple(((Tensor*)self)->levels_.slice()).release();
+       return levels_to_tuple(((Tensor*)self)->levels()).release();
        PY_END(nullptr)
    }},
     {NULL}  /* Sentinel */
@@ -1514,9 +1535,9 @@ static PyObject* positional(PyObject *_,
     PY_BEGIN
     AT_ASSERT(nargs-- > 0);
     auto self = Tensor::wrap(args++[0]);
-    at::Tensor& data = self->tensor_;
+    at::Tensor& data = self->tensor();
     auto levels = Slice<DimEntry>();
-    levels.extend(A, self->levels_.slice());
+    levels.extend(A, self->levels());
 
 
     at::IntArrayRef sz = data.sizes();
@@ -1597,7 +1618,7 @@ static PyObject* positional(PyObject *_,
     if (needs_view) {
         ndata = ndata.reshape(at::IntArrayRef(view_sizes.begin(), view_sizes.end()));
     }
-    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device_).release();
+    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
     PY_END(nullptr)
 }
 
@@ -1616,8 +1637,8 @@ static PyObject* expand(PyObject *_,
             return __torch_function__(A, torch_Tensor_expand, newargs, empty_dict).release();
         }
     }
-    at::Tensor& data = self->tensor_;
-    auto levels = self->levels_.slice();
+    at::Tensor& data = self->tensor();
+    auto levels = self->levels();
     Slice<DimEntry> new_levels;
     Slice<int64_t> sz;
     Slice<int64_t> sd;
@@ -1636,7 +1657,7 @@ static PyObject* expand(PyObject *_,
     sz.extend(A, osz.begin(), osz.end());
     sd.extend(A, osd.begin(), osd.end());
     at::Tensor ndata = data.as_strided(at::IntArrayRef(sz.begin(), sz.end()), at::IntArrayRef(sd.begin(), sd.end()), data.storage_offset());
-    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device_).release();
+    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
     PY_END(nullptr)
 }
 
