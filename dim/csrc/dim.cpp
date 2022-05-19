@@ -620,8 +620,8 @@ public:
         }
         return Tensor::alloc(TensorType);
     }
-    friend py::obj<Tensor> Tensor_from_batched(Arena& A, at::Tensor batched, bool has_device);
-    friend py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device);
+    static py::obj<Tensor> from_batched(Arena& A, at::Tensor batched, bool has_device);
+    static py::object from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device);
 };
 
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
@@ -740,7 +740,7 @@ struct TensorInfo {
     }
 };
 
-py::obj<Tensor> Tensor_from_batched(Arena& A, at::Tensor batched, bool has_device) {
+py::obj<Tensor> Tensor::from_batched(Arena& A, at::Tensor batched, bool has_device) {
     TensorInfo info = TensorInfo::create(A, batched, has_device != 0);
     py::obj<Tensor> self = Tensor::create();
     // grab ownership of the tensors
@@ -770,14 +770,14 @@ static PyObject* py_Tensor_from_batched(PyObject *self,
     if (!THPVariable_Check(py_batchedtensor.ptr())) {
         py::raise_error(PyExc_ValueError, "_batchedtensor is not a Tensor?");
     }
-    auto self = Tensor_from_batched(A, THPVariable_Unpack(py_batchedtensor.ptr()),  has_device != 0);
+    auto self = Tensor::from_batched(A, THPVariable_Unpack(py_batchedtensor.ptr()),  has_device != 0);
     return self.release();
 
     PY_END(nullptr)
 }
 
 
-py::object Tensor_from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
+py::object Tensor::from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
     size_t seen_dims = 0;
     int last = 0;
     for (auto l : levels) {
@@ -831,7 +831,7 @@ static PyObject* py_Tensor_from_positional(PyObject *self,
             levels.append(A, hdim);
         }
     }
-    return Tensor_from_positional(A, THPVariable_Unpack(tensor.ptr()), levels, has_device != 0).release();
+    return Tensor::from_positional(A, THPVariable_Unpack(tensor.ptr()), levels, has_device != 0).release();
     PY_END(nullptr)
 }
 
@@ -1117,7 +1117,7 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
         py::object result = orig.call_object(uargs, ukwargs);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())){
-                return A.autorelease(Tensor_from_positional(A, THPVariable_Unpack(h.ptr()), result_levels, device_holding_tensor));
+                return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), result_levels, device_holding_tensor));
             }
             return h;
         };
@@ -1142,7 +1142,7 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
         py::object result = orig.call_object(uargs, ukwargs);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())) {
-                return A.autorelease(Tensor_from_batched(A, THPVariable_Unpack(h.ptr()), device_holding_tensor));
+                return A.autorelease(Tensor::from_batched(A, THPVariable_Unpack(h.ptr()), device_holding_tensor));
             }
             return h;
         };
@@ -1618,7 +1618,7 @@ static PyObject* positional(PyObject *_,
     if (needs_view) {
         ndata = ndata.reshape(at::IntArrayRef(view_sizes.begin(), view_sizes.end()));
     }
-    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
+    return Tensor::from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
     PY_END(nullptr)
 }
 
@@ -1657,7 +1657,7 @@ static PyObject* expand(PyObject *_,
     sz.extend(A, osz.begin(), osz.end());
     sd.extend(A, osd.begin(), osd.end());
     at::Tensor ndata = data.as_strided(at::IntArrayRef(sz.begin(), sz.end()), at::IntArrayRef(sd.begin(), sd.end()), data.storage_offset());
-    return Tensor_from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
+    return Tensor::from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
     PY_END(nullptr)
 }
 
@@ -2031,7 +2031,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         rtensor = *self_info.tensor;
     }
     std::cout << "returning (from_positional)\n";
-    return Tensor_from_positional(A, std::move(rtensor), result_levels, self_info.has_device);
+    return Tensor::from_positional(A, std::move(rtensor), result_levels, self_info.has_device);
 }
 
 static PyObject* py___getitem__(PyObject *_,
@@ -2130,7 +2130,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
             EnableAllLayers l(info.levels);
             patched_args[0] = handle_from_tensor(A, info.batchedtensor);
             auto r = orig.call_vector(patched_args.begin(), patched_args.end(), kwnames);
-            return Tensor_from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device);
+            return Tensor::from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device);
         }
 
         auto info = TensorInfo::create(A, args[0]);
@@ -2182,7 +2182,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
         auto r = orig.call_vector(patched_args.begin(), patched_args.end(), kwnames);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())) {
-                return A.autorelease(Tensor_from_positional(A, THPVariable_Unpack(h.ptr()), new_levels, info.has_device));
+                return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), new_levels, info.has_device));
             }
             return h;
         };
