@@ -259,52 +259,58 @@ def cat(tensors, dim, new_dim):
     n = dims()
     return stack(tensors, n, dim).reshape_dim((n, dim), new_dim)
 
-_not_present = object()
+if True:
+    _wrap = _C._wrap
+    def _def(name, *args, **kwargs):
+        orig = getattr(torch.Tensor, name)
+        setattr(_Tensor, name, _C._instancemethod(_wrap(orig, *args, **kwargs)))
+else:
+    _not_present = object()
 
-def _getarg(name, offset, args, kwargs, default):
-    if len(args) > offset:
-        return args[offset]
-    return kwargs.get(name, default)
+    def _getarg(name, offset, args, kwargs, default):
+        if len(args) > offset:
+            return args[offset]
+        return kwargs.get(name, default)
 
-def _patcharg(name, offset, args, kwargs, value):
-    if len(args) > offset:
-        args[offset] = value
-    else:
-        kwargs[name] = value
-
-def _wrap(orig, dim_offset=0, keepdim_offset=1, dim_name='dim', single_dim=False, reduce=True):
-    def fn(self, *args, **kwargs):
-        dim = _getarg(dim_name, dim_offset, args, kwargs, _not_present)
-        if dim is _not_present or (single_dim and not isinstance(dim, Dim)):
-            with _enable_layers(self.dims):
-                print(f"dim fallback batch_tensor for {orig}")
-                return Tensor.from_batched(orig(self._batchtensor, *args, **kwargs), self._has_device)
-        keepdim = _getarg('keepdim', keepdim_offset, args, kwargs, False) if reduce else False
-        t, levels = self._tensor, list(self._levels)
-        dims = _dims(dim, self._batchtensor.ndim, keepdim, single_dim)
-        dim_indices = tuple(levels.index(d) for d in dims)
-        if reduce and not keepdim:
-            new_levels = [l for i, l in enumerate(levels) if i not in dim_indices]
+    def _patcharg(name, offset, args, kwargs, value):
+        if len(args) > offset:
+            args[offset] = value
         else:
-            new_levels = levels
+            kwargs[name] = value
 
-        if len(dim_indices) == 1:
-            dim_indices = dim_indices[0] # so that dims that really only take a single argument work...
-        args = list(args)
-        _patcharg(dim_name, dim_offset, args, kwargs, dim_indices)
-        def wrap(t):
-            if isinstance(t, TensorLike):
-                return Tensor.from_positional(t, new_levels, self._has_device)
-            return t
-        with _enable_layers(new_levels):
-            print(f"dim used batch_tensor for {orig}")
-            r = orig(t, *args, **kwargs)
-            return tree_map(wrap, r)
-    return fn
+    def _wrap(orig, dim_offset=0, keepdim_offset=1, dim_name='dim', single_dim=False, reduce=True):
+        def fn(self, *args, **kwargs):
+            dim = _getarg(dim_name, dim_offset, args, kwargs, _not_present)
+            if dim is _not_present or (single_dim and not isinstance(dim, Dim)):
+                with _enable_layers(self.dims):
+                    print(f"dim fallback batch_tensor for {orig}")
+                    return Tensor.from_batched(orig(self._batchtensor, *args, **kwargs), self._has_device)
+            keepdim = _getarg('keepdim', keepdim_offset, args, kwargs, False) if reduce else False
+            t, levels = self._tensor, list(self._levels)
+            dims = _dims(dim, self._batchtensor.ndim, keepdim, single_dim)
+            dim_indices = tuple(levels.index(d) for d in dims)
+            if reduce and not keepdim:
+                new_levels = [l for i, l in enumerate(levels) if i not in dim_indices]
+            else:
+                new_levels = levels
 
-def _def(name, *args, **kwargs):
-    orig = getattr(torch.Tensor, name)
-    setattr(_Tensor, name, _wrap(orig, *args, **kwargs))
+            if len(dim_indices) == 1:
+                dim_indices = dim_indices[0] # so that dims that really only take a single argument work...
+            args = list(args)
+            _patcharg(dim_name, dim_offset, args, kwargs, dim_indices)
+            def wrap(t):
+                if isinstance(t, TensorLike):
+                    return Tensor.from_positional(t, new_levels, self._has_device)
+                return t
+            with _enable_layers(new_levels):
+                print(f"dim used batch_tensor for {orig}")
+                r = orig(t, *args, **kwargs)
+                return tree_map(wrap, r)
+        return fn
+
+    def _def(name, *args, **kwargs):
+        orig = getattr(torch.Tensor, name)
+        setattr(_Tensor, name, _wrap(orig, *args, **kwargs))
 
 
 _def('mean')

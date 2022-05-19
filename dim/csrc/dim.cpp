@@ -2024,6 +2024,248 @@ static PyObject* py___getitem__(PyObject *_,
     PY_END(nullptr)
 }
 
+struct WrappedOperator : public py::base<WrappedOperator> {
+    py::object orig;
+    int64_t dim_offset = 0;
+    int64_t keepdim_offset = 1;
+    py::object dim_name;
+    py::object keepdim_name;
+    bool single_dim = false;
+    bool reduce = true;
+    static PyTypeObject Type;
+    void init() {}
+    DimEntry _wrap_dim(Arena& A, py::handle d, size_t N, bool keepdim) {
+        if (Dim::check(d)) {
+            if (keepdim) {
+                py::raise_error(PyExc_ValueError, "cannot preserve first-class dimensions with keepdim=True");
+            }
+            return Dim::unchecked_wrap(d);
+        } else if (py::is_int(d)) {
+            auto i = py::to_int(d);
+            while (i >= 0) {
+                i -= N;
+            }
+            return i;
+        } else {
+            return DimEntry();
+        }
+    }
+
+    Slice<DimEntry> _dims(Arena& A, py::handle d, size_t N, bool keepdim) {
+        auto de = _wrap_dim(A, d, N, keepdim);
+        Slice<DimEntry> r;
+        if (!de.is_none()) {
+            r.append(A, de);
+        } else {
+            py::sequence_view sq(d);
+            for (auto i : sq.enumerate()) {
+                r.append(A, _wrap_dim(A, A.autorelease(sq[i]), N, keepdim));
+            }
+        }
+        return r;
+    }
+
+    py::object run(Arena& A, PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+        py::tuple_view tv(kwnames);
+        auto _getarg = [&](py::handle name, int64_t offset_) -> py::handle {
+            auto offset = offset_ + 1; // do not include self
+            if (nargs > offset) {
+                return args[offset];
+            }
+            if (kwnames) {
+                for (auto i : tv.enumerate()) {
+                    if (PyObject_RichCompareBool(tv[i].ptr(), name.ptr(), Py_EQ)) {
+                        return args[nargs + i];
+                    }
+                }
+            }
+            return py::handle();
+        };
+        Slice<py::handle> patched_args;
+        auto nkwnames = kwnames ? tv.size() : 0;
+        patched_args.extend(A, (py::handle*) args, (py::handle*) args + nargs + nkwnames);
+        auto _patcharg = [&](py::handle name, int64_t offset_, py::handle value) {
+            auto offset = offset_ + 1; // do not include self
+            if (nargs > offset) {
+                patched_args[offset] = value.ptr();
+                return;
+            }
+            if (kwnames) {
+                for (auto i : tv.enumerate()) {
+                    if (PyObject_RichCompareBool(tv[i].ptr(), name.ptr(), Py_EQ)) {
+                        patched_args[nargs + i] = value;
+                        return;
+                    }
+                }
+            }
+            py::raise_error(PyExc_ValueError, "Missing argument %R", name.ptr());
+        };
+
+        auto dim = _getarg(dim_name, dim_offset);
+        if (!dim.ptr()) {
+            auto info = TensorInfo::create(A, args[0], true);
+            EnableAllLayers l(info.levels);
+            patched_args[0] = handle_from_tensor(A, info.batchedtensor);
+            auto r = orig.call_vector(patched_args.begin(), patched_args.end(), kwnames);
+            return Tensor_from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device);
+        }
+
+        auto info = TensorInfo::create(A, args[0]);
+        auto keepdim = false;
+        if (reduce) {
+            auto py_keepdim = _getarg(keepdim_name,keepdim_offset);
+            if (py_keepdim.ptr()) {
+                keepdim = py::to_bool(py_keepdim);
+            }
+        }
+
+        auto ndim = info.ndim();
+        auto dims = _dims(A, dim, ndim, keepdim);
+        Slice<int64_t> dim_indices;
+        auto seen = A.allocate<bool>(info.levels.size());
+        std::fill(seen, seen + info.levels.size(), false);
+
+        for (auto d : dims) {
+            auto midx = info.levels.index(d);
+            if (!midx) {
+                auto tup = levels_to_tuple(info.levels);
+                py::raise_error(PyExc_ValueError, "Tensor with dimensions %R does not contain one of %R\n", tup.ptr(), dim.ptr());
+            }
+            seen[*midx] = true;
+            dim_indices.append(A, *midx);
+        }
+        Slice<DimEntry> new_levels;
+        if (reduce && !keepdim) {
+            for (auto i : info.levels.enumerate()) {
+                if (!seen[i]) {
+                    new_levels.append(A, info.levels[i]);
+                }
+            }
+        } else {
+            new_levels = info.levels;
+        }
+        py::object py_indices;
+        if (dim_indices.size() == 1) {
+            py_indices = py::from_int(dim_indices[0]);
+        } else {
+            py::tuple tup(dim_indices.size());
+            for (auto i : dim_indices.enumerate()) {
+                tup.set(i, py::from_int(dim_indices[i]));
+            }
+            py_indices = std::move(tup);
+        }
+        _patcharg(dim_name, dim_offset, py_indices);
+        patched_args[0] = handle_from_tensor(A, info.tensor);
+        auto r = orig.call_vector(patched_args.begin(), patched_args.end(), kwnames);
+        auto wrap = [&](py::handle h) {
+            if (THPVariable_Check(h.ptr())) {
+                return A.autorelease(Tensor_from_positional(A, THPVariable_Unpack(h.ptr()), new_levels, info.has_device));
+            }
+            return h;
+        };
+        return tree_map(A, wrap, r);
+    }
+
+};
+
+PyTypeObject WrappedOperator::Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "_C.WrappedOperator",               /* tp_name */
+    sizeof(WrappedOperator),               /* tp_basicsize */
+    0,                              /* tp_itemsize */
+    WrappedOperator::dealloc_stub,      /* tp_dealloc */
+    0,                              /* tp_vectorcall_offset */
+    0,                              /* tp_getattr */
+    0,                              /* tp_setattr */
+    0,                              /* tp_as_async */
+    0,           /* tp_repr */
+    0,                 /* tp_as_number */
+    0,                 /* tp_as_sequence */
+    0,             /* tp_as_mapping */
+    0,      /* tp_hash */
+    0,                              /* tp_call */
+    0,                              /* tp_str */
+    0,                              /* tp_getattro */
+    0,                              /* tp_setattro */
+    0,                              /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT, /* tp_flags */
+    "Wrapped Object Holder",                   /* tp_doc */
+    0,                              /* tp_traverse */
+    0,                              /* tp_clear */
+    0,  /* tp_richcompare */
+    0,                              /* tp_weaklistoffset */
+    0,                              /* tp_iter */
+    0,                              /* tp_iternext */
+    0,                /* tp_methods */
+    0,                              /* tp_members */
+    0,             /* tp_getset */
+    0,                              /* tp_base */
+    0,                              /* tp_dict */
+    0,                              /* tp_descr_get */
+    0,                              /* tp_descr_set */
+    0,                              /* tp_dictoffset */
+    0,            /* tp_init */
+    0,                              /* tp_alloc */
+    WrappedOperator::new_stub,                      /* tp_new */
+};
+
+static PyObject* py_wrapped_operator(PyObject * self_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    auto self = WrappedOperator::unchecked_wrap(self_);
+    PY_BEGIN
+    return self->run(A, args, nargs, kwnames).release();
+    PY_END(nullptr)
+}
+
+
+PyMethodDef py_wrapped_operator_def = {"wrapped", (PyCFunction) py_wrapped_operator, METH_FASTCALL | METH_KEYWORDS};
+
+
+static PyObject* _wrap(PyObject * self_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+
+    #define ARGS(_) _(py::handle, orig) _(py::handle, dim_offset) _(py::handle, keepdim_offset) \
+                    _(py::handle, dim_name) _(py::handle, single_dim) _(py::handle, reduce)
+    MPY_PARSE_ARGS_KWNAMES("O|OOOOO", ARGS)
+
+    auto info = WrappedOperator::create();
+    info->orig = py::object::borrow(orig);
+    if (dim_offset.ptr()) {
+        info->dim_offset = py::to_int(dim_offset);
+    }
+    if (keepdim_offset.ptr()) {
+        info->keepdim_offset = py::to_int(keepdim_offset);
+    }
+    if (dim_name.ptr()) {
+        info->dim_name = py::object::borrow(dim_name);
+    } else {
+        info->dim_name = py::unicode_from_string("dim");
+    }
+    info->keepdim_name = py::unicode_from_string("keepdim");
+    if (single_dim.ptr()) {
+        info->single_dim = py::to_bool(single_dim);
+    }
+    if (reduce.ptr()) {
+        info->reduce = py::to_bool(reduce);
+    }
+    return py::object::checked_steal(PyCFunction_New(&py_wrapped_operator_def, info.release())).release();
+
+    #undef ARGS
+
+    PY_END(nullptr)
+}
+
+
+
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
@@ -2036,6 +2278,7 @@ static PyMethodDef methods[] = {
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
+    {"_wrap", (PyCFunction) _wrap, METH_FASTCALL | METH_KEYWORDS},
 
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
@@ -2055,6 +2298,7 @@ PyMODINIT_FUNC PyInit__C(void) {
         Dim::ready(mod, "Dim");
         DimList::ready(mod, "DimList");
         Tensor::ready(mod, "Tensor");
+        WrappedOperator::ready(mod, "_WrappedOperator");
         Py_INCREF(&PyInstanceMethod_Type);
         PyModule_AddObject(mod.ptr(), "_instancemethod", (PyObject *)&PyInstanceMethod_Type);
         return mod.release();

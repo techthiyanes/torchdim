@@ -61,7 +61,7 @@ struct handle {
     object call(Args&&... args);
     object call_object(py::handle args);
     object call_object(py::handle args, py::handle kwargs);
-
+    object call_vector(py::handle* begin, py::handle* end, py::handle kwnames);
     bool operator==(handle rhs) {
         return ptr_ == rhs.ptr_;
     }
@@ -284,6 +284,14 @@ inline object handle::call_object(py::handle args, py::handle kwargs) {
     return object::checked_steal(PyObject_Call(ptr(), args.ptr(), kwargs.ptr()));
 }
 
+inline object handle::call_vector(py::handle* begin, py::handle* end, py::handle kwnames) {
+    auto nargs = end - begin;
+    if (kwnames.ptr()) {
+        nargs -= PyTuple_Size(kwnames.ptr());
+    }
+    return object::checked_steal(_PyObject_Vectorcall(ptr(), (PyObject*const*) begin, nargs, kwnames.ptr()));
+}
+
 struct tuple : public object {
     void set(int i, object v) {
         PyTuple_SET_ITEM(ptr_, i, v.release());
@@ -391,6 +399,10 @@ double to_float(handle h) {
 
 bool to_bool_unsafe(handle h) {
     return h.ptr() == Py_True;
+}
+
+bool to_bool(handle h) {
+    return PyObject_IsTrue(h.ptr()) != 0;
 }
 
 struct slice_view {
