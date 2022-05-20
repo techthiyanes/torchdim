@@ -8,6 +8,7 @@
 #include <torch/csrc/autograd/python_variable.h>
 #include <functorch/csrc/BatchedTensorImpl.h>
 #include <ATen/ATen.h>
+#include <memory>
 #include "arena.h"
 
 
@@ -32,6 +33,7 @@ int whooo;
 py::handle empty_dict;
 py::handle torch_Tensor___mul__;
 py::handle _Tensor;
+py::handle _Tensor_sum;
 py::handle DelayedMulTensor;
 py::handle NamedTuple;
 py::dict_view pointwise;
@@ -55,6 +57,7 @@ static void maybeInitializeGlobals() {
     auto TensorBase = (PyTypeObject*) torch.attr("_C").attr("_TensorBase").ptr();
     THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
     no_slice = PySlice_New(NULL, NULL, NULL);
+    _Tensor_sum = _Tensor.attr("sum");
 }
 
 py::handle DimensionBindError_;
@@ -588,6 +591,16 @@ static int DimList_init(DimList *self, PyObject *args, PyObject *kwds) {
 
 PyTypeObject* TensorType = nullptr; // the python wrapper type.
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_);
+static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_, bool is_pointwise);
+void free_levels_dims(Slice<DimEntry> levels);
+
+struct Tensor;
+
+struct DelayedOperator {
+    py::object orig;
+    py::object args;
+    py::object kwargs;
+};
 
 struct Tensor : public py::base<Tensor> {
 private:
@@ -595,14 +608,23 @@ private:
     at::Tensor batchtensor_;
     OwnedSlice<DimEntry> levels_;
     bool has_device_;
+    std::unique_ptr<DelayedOperator> delayed_;
 public:
-    at::Tensor& tensor() {
+    at::Tensor& tensor(Arena& A) {
+        if (!tensor_.defined()) {
+            AT_ASSERT(delayed_);
+            auto t = Tensor::wrap(run_torch_function(A, delayed_->orig, delayed_->args, delayed_->kwargs, true));
+            tensor_ = t->tensor(A);
+            delayed_.reset();
+            // don't force creation of batch tensor if it wasn't alreay provided.
+            batchtensor_ = t->batchtensor_;
+            AT_ASSERT(levels() == t->levels());
+        }
         return tensor_;
     }
     at::Tensor& batchtensor(Arena& A) {
         if (!batchtensor_.defined()) {
-            std::cout << "CREATING BATCH TENSOR!\n";
-            batchtensor_ = _add_batch_dims(A, tensor_, levels_.slice());
+            batchtensor_ = _add_batch_dims(A, tensor(A), levels_.slice());
         }
         return batchtensor_;
     }
@@ -612,6 +634,9 @@ public:
     bool has_device() {
         return has_device_;
     }
+    DelayedOperator* delayed() {
+        return delayed_.get();
+    }
     static PyTypeObject Type;
 
     static py::obj<Tensor> create() {
@@ -620,8 +645,18 @@ public:
         }
         return Tensor::alloc(TensorType);
     }
+    void capture_levels(Slice<DimEntry> levels) {
+        // grab ownership of the dims inside levels
+        for (auto l : levels) {
+            if (!l.is_positional()) {
+                py::object::borrow(l.dim()).release();
+            }
+        }
+        levels_.set(levels, free_levels_dims);
+    }
     static py::obj<Tensor> from_batched(Arena& A, at::Tensor batched, bool has_device);
     static py::object from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device);
+    static py::obj<Tensor> create_delayed(py::object op, py::object args, py::object kwargs, Slice<DimEntry> levels, bool has_device);
 };
 
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
@@ -674,19 +709,23 @@ inline TensorRef unchecked_tensor_from(py::handle p) {
     return TensorRef(*v->cdata);
 }
 
+int64_t ndim_of_levels(Slice<DimEntry> levels) {
+    int64_t r = 0;
+    for (auto l : levels) {
+        if (l.is_positional()) {
+            ++r;
+        }
+    }
+    return r;
+}
+
 struct TensorInfo {
     TensorRef tensor;
     Slice<DimEntry> levels;
     bool has_device;
     TensorRef batchedtensor;
     int64_t ndim() const {
-        int64_t r = 0;
-        for (auto l : levels) {
-            if (l.is_positional()) {
-                ++r;
-            }
-        }
-        return r;
+        return ndim_of_levels(levels);
     }
     operator bool() const {
         return tensor;
@@ -695,7 +734,7 @@ struct TensorInfo {
     static TensorInfo create(Arena& A, py::handle h, bool ensure_batched=true, bool ensure_present=true) {
         if (Tensor::check(h)) {
             auto t = Tensor::unchecked_wrap(h);
-            return TensorInfo {t->tensor(), t->levels(), t->has_device(), ensure_batched ? t->batchtensor(A) : TensorRef()};
+            return TensorInfo {t->tensor(A), t->levels(), t->has_device(), ensure_batched ? t->batchtensor(A) : TensorRef()};
         } else if (THPVariable_Check(h.ptr())) {
             TensorRef t = unchecked_tensor_from(h);
             Slice<DimEntry> levels;
@@ -747,13 +786,7 @@ py::obj<Tensor> Tensor::from_batched(Arena& A, at::Tensor batched, bool has_devi
     self->tensor_ = *info.tensor;
     self->batchtensor_ = std::move(batched);
     self->has_device_ = info.has_device;
-    // grab ownership of the dims inside levels
-    for (auto l : info.levels) {
-        if (!l.is_positional()) {
-            py::object::borrow(l.dim()).release();
-        }
-    }
-    self->levels_.set(info.levels, free_levels_dims);
+    self->capture_levels(info.levels);
     return self;
 }
 
@@ -833,6 +866,14 @@ static PyObject* py_Tensor_from_positional(PyObject *self,
     }
     return Tensor::from_positional(A, THPVariable_Unpack(tensor.ptr()), levels, has_device != 0).release();
     PY_END(nullptr)
+}
+
+py::obj<Tensor> Tensor::create_delayed(py::object op, py::object args, py::object kwargs, Slice<DimEntry> levels, bool has_device) {
+    py::obj<Tensor> self = Tensor::create();
+    self->capture_levels(levels);
+    self->has_device_ = has_device;
+    self->delayed_ = std::make_unique<DelayedOperator>(DelayedOperator {std::move(op), std::move(args), std::move(kwargs)});
+    return self;
 }
 
 py::list slice_to_list(Slice<py::handle> h) {
@@ -1062,25 +1103,13 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
 }
 
 
-
-static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
-    maybeInitializeGlobals();
-    bool is_pointwise = pointwise.contains(orig);
-
-    if (orig == torch_Tensor___mul__) {
-        AT_ASSERT(args_.size() == 2);
-        if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args_[1]) == 0) {
-            std::cout << "__torch_function__ " << "delay" << " " << orig << "\n";
-
-            return DelayedMulTensor.call_object(args_);
-        }
-    }
-    std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
-
+static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_, bool is_pointwise) {
+    //std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
     Slice<py::hdl<Dim>> all_dims;
     Slice<py::handle> flat_args;
     auto unflatten_args = tree_flatten(A, args_, flat_args);
     auto unflatten_kwargs = tree_flatten(A, kwargs_, flat_args);
+
     TensorRef device_holding_tensor;
 
     Slice<TensorInfo> infos;
@@ -1108,9 +1137,11 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
                 if (device_holding_tensor && !infos[i].has_device) {
                     tensor = A.autorelease(tensor->to(device_holding_tensor->device()));
                 }
-                flat_args[i] = handle_from_tensor(A, _match_levels(A, tensor, infos[i].levels, result_levels));
+                auto ml = _match_levels(A, tensor, infos[i].levels, result_levels);
+                flat_args[i] = handle_from_tensor(A, std::move(ml));
             }
         }
+
         Slice<py::handle> flat_it = flat_args;
         py::object uargs = unflatten_args(flat_it);
         py::object ukwargs = unflatten_kwargs(flat_it);
@@ -1150,6 +1181,32 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
     }
 }
 
+static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
+    maybeInitializeGlobals();
+    bool is_pointwise = pointwise.contains(orig);
+
+    if (orig == torch_Tensor___mul__) {
+        AT_ASSERT(args_.size() == 2);
+        if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args_[1]) == 0) {
+            bool has_device = false;
+            Slice<DimEntry> levels;
+            for (auto i : args_.enumerate()) {
+                auto t = TensorInfo::create(A, args_[i], false);
+                has_device = has_device || t.has_device;
+                for (auto l : t.levels) {
+                    if (!levels.contains(l)) {
+                        levels.append(A, l);
+                    }
+                }
+            }
+            // std::cout << "__torch_function__ " << "delay" << " " << orig << "\n";
+            return Tensor::create_delayed(py::object::borrow(orig), py::object::borrow(args_), py::object::borrow(kwargs_), levels, has_device);
+            return DelayedMulTensor.call_object(args_);
+        }
+    }
+    return run_torch_function(A, orig, args_, kwargs_, is_pointwise);
+}
+
 
 static PyObject* py___torch_function__(PyObject *self,
                       PyObject *const *args,
@@ -1157,13 +1214,13 @@ static PyObject* py___torch_function__(PyObject *self,
                       PyObject *kwnames) {
     Arena A;
     PY_BEGIN
-    #define ARGS(_) _(py::handle, cls) _(py::handle, orig) _(py::handle, cls2) _(py::tuple_view, args_) _(py::handle, kwargs_)
-    MPY_PARSE_ARGS_KWNAMES("OOOO|O", ARGS)
-    #undef ARGS
-    if (!kwargs_.ptr()) {
-        kwargs_ = empty_dict;
+    if (nargs == 4) {
+        // cls orig cls2 args NONE
+        return __torch_function__(A, args[1], py::tuple_view(args[3]), empty_dict).release();
+    } else {
+        AT_ASSERT(nargs == 5);
+        return __torch_function__(A, args[1], py::tuple_view(args[3]), args[4]).release();
     }
-    return __torch_function__(A, orig, args_, kwargs_).release();
     PY_END(nullptr)
 }
 
@@ -1178,7 +1235,9 @@ py::object levels_to_tuple(Slice<DimEntry> slice) {
 
 static PyGetSetDef Tensor_getsetters[] = {
    {"_has_device", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_bool(((Tensor*)self)->has_device()).release(); }, NULL},
-   {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* { return THPVariable_Wrap(((Tensor*)self)->tensor()); }, NULL},
+   {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* {
+       Arena A;
+       return THPVariable_Wrap(((Tensor*)self)->tensor(A)); }, NULL},
    {"_batchtensor", (getter) [](PyObject* self, void*) -> PyObject* {
        Arena A;
        return THPVariable_Wrap(((Tensor*)self)->batchtensor(A)); }, NULL},
@@ -1321,135 +1380,145 @@ int64_t dim_index(const std::vector<py::obj<Dim>>& dims, py::hdl<Dim> dim) {
     return -1;
 }
 
+struct SizeStride {
+    Slice<int64_t> sizes;
+    Slice<int64_t> strides;
+    void append(Arena & A, int64_t sz, int64_t sd) {
+        sizes.append(A, sz);
+        strides.append(A, sd);
+    }
+};
 
-// py::obj<Tensor> dot(py::hdl<Tensor> lhs, py::hdl<Tensor> rhs, const std::vector<py::obj<Dim>>& sum) {
-//     auto& lhs_dims  = lhs->dims();
-//     auto& rhs_dims = rhs->dims();
-//     auto lhs_ = lhs->data();
-//     auto rhs_ = rhs->data();
+struct DotParts {
+    SizeStride batch; // dimension appear in lhs and rhs, not summed
+    SizeStride reduce; // dimension appear in lhs and rhs, summend
+    SizeStride only; // dimension appear in just the lhs or just the right hand size
+};
 
-//     at::IntArrayRef lhs_strides = lhs_.strides();
-//     at::IntArrayRef rhs_strides = rhs_.strides();
+template<typename T>
+static at::ArrayRef<T> as_array_ref(Slice<T> t) {
+    return at::ArrayRef<T>(t.begin(), t.end());
+}
+
+py::object dot(Arena& A, TensorInfo lhs, TensorInfo rhs, Slice<DimEntry> sum) {
+
+    auto lhs_strides = lhs.tensor->strides();
+    auto rhs_strides = rhs.tensor->strides();
+
+    int64_t lro_size = 1;
+    int64_t lo_size = 1;
+    int64_t ro_size = 1;
+    int64_t lr_size = 1;
+
+    DotParts lhs_dims;
+    DotParts rhs_dims;
+
+    Slice<DimEntry> batch_dims;
+    Slice<DimEntry> lo_dims;
+    Slice<DimEntry> ro_dims;
 
 
-//     int64_t max_size = lhs_dims.size() + rhs_dims.size();
+    auto insert_dim = [&] (py::hdl<Dim> d, at::optional<int> lhs_idx, at::optional<int> rhs_idx) {
+        bool reduced = sum.contains(d);
+        int64_t size = d->size();
+        int64_t lhs_stride = lhs_idx ? lhs_strides[*lhs_idx] : 0;
+        int64_t rhs_stride = rhs_idx ? rhs_strides[*rhs_idx] : 0;
+        if (reduced) {
+            // lr
+            lr_size *= size;
+            lhs_dims.reduce.append(A, size, lhs_stride);
+            rhs_dims.reduce.append(A, size, rhs_stride);
+        } else {
+            if ((lhs_stride == 0) == (rhs_stride == 0)) {
+                // lro
+                lhs_dims.batch.append(A, size, lhs_stride);
+                rhs_dims.batch.append(A, size, rhs_stride);
+                batch_dims.append(A, d);
+                lro_size *= size;
+            } else if (lhs_stride != 0) {
+                // lo
+                lhs_dims.only.append(A, size, lhs_stride);
+                lo_size *= size;
+                lo_dims.append(A, d);
+            } else {
+                AT_ASSERT(rhs_stride != 0);
+                // ro
+                rhs_dims.only.append(A, size, rhs_stride);
+                ro_size *= size;
+                ro_dims.append(A, d);
 
-//     int64_t lro_size = 1;
-//     int64_t lro_dim = 0;
+            }
+        }
+    };
 
-//     int64_t lo_size = 1;
-//     int64_t lo_dim = 0;
+    auto rhs_seen = A.allocate<bool>(rhs.levels.size());
+    std::fill(rhs_seen, rhs_seen + rhs.levels.size(), false);
 
-//     int64_t ro_size = 1;
-//     int64_t ro_dim = 0;
+    for (auto i : lhs.levels.enumerate()) {
+        auto d = lhs.levels[i];
+        auto rhs_idx = rhs.levels.index(d);
+        if (rhs_idx) {
+            rhs_seen[*rhs_idx] = true;
+        }
+        insert_dim(d.dim(), i, rhs_idx);
+    }
 
-//     int64_t lr_size = 1;
-//     int64_t lr_dim = 0;
+    for (auto i : rhs.levels.enumerate()) {
+        if (rhs_seen[i]) {
+            continue;
+        }
+        auto d = rhs.levels[i];
+        insert_dim(d.dim(), at::nullopt, i);
+    }
 
-//     std::vector<int64_t> n_lhs_sizes, n_lhs_strides, n_rhs_sizes, n_rhs_strides;
-//     n_lhs_sizes.reserve(max_size);
-//     n_rhs_sizes.reserve(max_size);
-//     n_lhs_strides.reserve(max_size);
-//     n_rhs_strides.reserve(max_size);
+    Slice<int64_t> n_lhs_sizes;
+    n_lhs_sizes.extend(A, lhs_dims.batch.sizes);
+    n_lhs_sizes.extend(A, lhs_dims.only.sizes);
+    n_lhs_sizes.extend(A, lhs_dims.reduce.sizes);
+    Slice<int64_t> n_lhs_strides;
+    n_lhs_strides.extend(A, lhs_dims.batch.strides);
+    n_lhs_strides.extend(A, lhs_dims.only.strides);
+    n_lhs_strides.extend(A, lhs_dims.reduce.strides);
 
-//     std::vector<py::obj<Dim>> o_dims;
-//     std::vector<int64_t> o_size;
-//     o_dims.reserve(max_size);
-//     o_size.reserve(max_size);
+    Slice<int64_t> n_rhs_sizes;
+    n_rhs_sizes.extend(A, rhs_dims.batch.sizes);
+    n_rhs_sizes.extend(A, rhs_dims.reduce.sizes);
+    n_rhs_sizes.extend(A, rhs_dims.only.sizes);
+    Slice<int64_t> n_rhs_strides;
+    n_rhs_strides.extend(A, rhs_dims.batch.strides);
+    n_rhs_strides.extend(A, rhs_dims.reduce.strides);
+    n_rhs_strides.extend(A, rhs_dims.only.strides);
 
-//     auto insert = [&] (std::vector<int64_t>& arr, size_t i, int64_t v) {
-//         arr.insert(arr.begin() + i, v);
-//     };
-//     auto insert_dim = [&] (py::hdl<Dim> d, int64_t lhs_idx, int64_t rhs_idx, bool sum) {
-//         int64_t size = d->size();
-//         int64_t lhs_stride = lhs_idx == -1 ? 0 : lhs_strides[lhs_idx];
-//         int64_t rhs_stride = rhs_idx == -1 ? 0 : rhs_strides[rhs_idx];
-//         if (sum) {
-//             // lr
-//             lr_size *= size;
-//             int64_t l_idx = lro_dim + lo_dim + lr_dim;
-//             int64_t r_idx = lro_dim + lr_dim;
-//             insert(n_lhs_strides, l_idx, lhs_stride);
-//             insert(n_lhs_sizes, l_idx, size);
-//             insert(n_rhs_strides, r_idx, rhs_stride);
-//             insert(n_rhs_sizes, r_idx, size);
-//             lr_dim += 1;
-//         } else {
-//             if ((lhs_stride == 0) == (rhs_stride == 0)) {
-//                 // lro
-//                 insert(n_lhs_strides, lro_dim, lhs_stride);
-//                 insert(n_lhs_sizes, lro_dim, size);
-//                 insert(n_rhs_strides, lro_dim, rhs_stride);
-//                 insert(n_rhs_sizes, lro_dim, size);
-//                 insert(o_size, lro_dim, size);
-//                 o_dims.insert(o_dims.begin() + lro_dim, py::obj<Dim>::borrow(d));
-//                 lro_size *= size;
-//                 lro_dim += 1;
-//             } else if (lhs_stride != 0) {
-//                 // lo
-//                 int64_t idx = lro_dim + lo_dim;
-//                 insert(n_lhs_strides, idx, lhs_stride);
-//                 insert(n_lhs_sizes, idx, size);
+    Slice<int64_t> o_size;
+    o_size.extend(A, lhs_dims.batch.sizes);
+    o_size.extend(A, lhs_dims.only.sizes);
+    o_size.extend(A, rhs_dims.only.sizes);
 
-//                 insert(o_size, idx, size);
-//                 o_dims.insert(o_dims.begin() + idx, py::obj<Dim>::borrow(d));
+    Slice<DimEntry> result_levels;
+    result_levels.extend(A, batch_dims);
+    result_levels.extend(A, lo_dims);
+    result_levels.extend(A, ro_dims);
 
-//                 lo_size *= size;
-//                 lo_dim += 1;
-//             } else {
-//                 AT_ASSERT(rhs_stride != 0);
-//                 // ro
-//                 int64_t idx = lro_dim + lr_dim + ro_dim;
-//                 insert(n_rhs_strides, idx, rhs_stride);
-//                 insert(n_rhs_sizes, idx, size);
+    if (lhs_dims.reduce.sizes.size() != sum.size()) {
+        for (auto & d : sum) {
+            if (result_levels.contains(d)) {
+                py::raise_error(DimensionBindError(), "summing over non-existant dimension %S", d.dim().ptr());
+            }
+        }
+    }
 
-//                 int64_t o_idx = lro_dim + lo_dim + ro_dim;
-//                 insert(o_size,  o_idx, size);
-//                 o_dims.insert(o_dims.begin() + o_idx, py::obj<Dim>::borrow(d));
+    // std::cout << "dot " << lhs.levels << ","  << rhs.levels << "->" << result_levels << "\n";
+    auto lhs_ = lhs.tensor->as_strided(as_array_ref(n_lhs_sizes), as_array_ref(n_lhs_strides), lhs.tensor->storage_offset());
+    auto rhs_ = rhs.tensor->as_strided(as_array_ref(n_rhs_sizes), as_array_ref(n_rhs_strides), rhs.tensor->storage_offset());
 
-//                 ro_size *= size;
-//                 ro_dim += 1;
-//             }
-//         }
-//     };
+    lhs_ = lhs_.reshape({lro_size, lo_size, lr_size});
+    rhs_ = rhs_.reshape({lro_size, lr_size, ro_size});
 
-//     std::vector<bool> rhs_seen(rhs_dims.size(), false);
+    auto result = at::bmm(lhs_, rhs_);
+    result = result.reshape(as_array_ref(o_size));
 
-//     for (int64_t i = 0, N = lhs_dims.size(); i < N; ++i) {
-//         py::hdl<Dim> d = lhs_dims[i];
-//         auto rhs_idx = dim_index(rhs_dims, d);
-//         if (rhs_idx != -1) {
-//             rhs_seen[rhs_idx] = true;
-//         }
-//         auto s_idx = dim_index(sum, d);
-//         insert_dim(d, i, rhs_idx, s_idx != -1);
-//     }
-//     for (int64_t i = 0, N = rhs_dims.size(); i < N; ++i) {
-//         if (rhs_seen[i]) {
-//             continue;
-//         }
-//         py::hdl<Dim> d = rhs_dims[i];
-//         auto s_idx = dim_index(sum, d);
-//         insert_dim(d, -1, i, s_idx != -1);
-//     }
-
-//     if (lr_dim != sum.size()) {
-//         for (auto & d : sum) {
-//             if (-1 == dim_index(o_dims, d)) {
-//                 py::raise_error(DimensionBindError(), "summing over non-existant dimension %S", d.ptr());
-//             }
-//         }
-//     }
-
-//     lhs_ = lhs_.as_strided(n_lhs_sizes, n_lhs_strides, lhs_.storage_offset());
-//     rhs_ = rhs_.as_strided(n_rhs_sizes, n_rhs_strides, rhs_.storage_offset());
-//     lhs_ = lhs_.reshape({lro_size, lo_size, lr_size});
-//     rhs_ = rhs_.reshape({lro_size, lr_size, ro_size});
-
-//     auto result = at::bmm(lhs_, rhs_);
-//     result = result.reshape(o_size);
-//     return Tensor::create_subclass(std::move(o_dims), std::move(result), false);
-// }
+    return Tensor::from_positional(A, std::move(result), result_levels, true);
+}
 
 static PyObject* test_c(PyObject *self,
                       PyObject *const *args,
@@ -1535,7 +1604,7 @@ static PyObject* positional(PyObject *_,
     PY_BEGIN
     AT_ASSERT(nargs-- > 0);
     auto self = Tensor::wrap(args++[0]);
-    at::Tensor& data = self->tensor();
+    at::Tensor& data = self->tensor(A);
     auto levels = Slice<DimEntry>();
     levels.extend(A, self->levels());
 
@@ -1637,7 +1706,7 @@ static PyObject* expand(PyObject *_,
             return __torch_function__(A, torch_Tensor_expand, newargs, empty_dict).release();
         }
     }
-    at::Tensor& data = self->tensor();
+    at::Tensor& data = self->tensor(A);
     auto levels = self->levels();
     Slice<DimEntry> new_levels;
     Slice<int64_t> sz;
@@ -1780,7 +1849,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
     }
 
-    std::cout << "__getitem__ " << self << " " << index << "\n";
+    // std::cout << "__getitem__ " << self << " " << index << "\n";
 
     TensorInfo self_info = TensorInfo::create(A, self, false, true);
     auto ndim = self_info.ndim();
@@ -1804,7 +1873,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     }
 
     // flatten out any dimensions stored in dimlist elements directly into the inputs
-    std::cout << dimlists << " <- dim lists!\n";
+    // std::cout << dimlists << " <- dim lists!\n";
     for (int64_t i = dimlists.size() - 1; i >=0; --i) {
         auto idx = dimlists[i];
         // we added more elements to input because of ...
@@ -1816,9 +1885,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         auto dl = DimList::unchecked_wrap(input[idx]);
         // XXX would be better if we used an OwnedSlice in DimList
         Slice<py::handle> more_dims((py::handle*) &*dl->dims_.begin(), (py::handle*) &*dl->dims_.end());
-        std::cout << "INSERTING " << more_dims << " into " << input << "\n";
         input.insert(A, input.slice(idx, idx + 1), more_dims);
-        std::cout << "AFTER " << input << "\n";
     }
 
 
@@ -1869,7 +1936,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             nsd.append(A, sd[i]);
         }
     };
-    std::cout << "self levels: " << self_info.levels << "\n";
+    // std::cout << "self levels: " << self_info.levels << "\n";
 
     auto parse_nones = [&]() {
         while (input_it.size() && py::is_none(input_it[0])) {
@@ -1962,7 +2029,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
                  tensor_insert_point = result_levels.size();
              }
              for (auto l : tensor_inputs[i].levels) {
-                 std::cout << "Consider to add " << l << "\n";
+                 // std::cout << "Consider to add " << l << "\n";
                  if (!index_levels.contains(l)) {
                      index_levels.append(A, l);
                  }
@@ -1995,16 +2062,16 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         result_levels.insert(A, result_levels.slice(tensor_insert_point, tensor_insert_point), index_levels);
     }
 
-    std::cout << "flat inputs: " << flat_inputs << "\n";
-    std::cout << "result_levels: " << result_levels << "\n";
-    std::cout << "index_levels: " << index_levels << "\n";
+    // std::cout << "flat inputs: " << flat_inputs << "\n";
+    // std::cout << "result_levels: " << result_levels << "\n";
+    // std::cout << "index_levels: " << index_levels << "\n";
 
     // get all the tensors to be the right shape for indexing
     if (requires_getindex) {
         for (auto i : flat_inputs.enumerate()) {
             if (tensor_inputs[i]) {
                 AT_ASSERT(!flat_inputs[i].ptr());
-                std::cout << "tensor " << i << " " << tensor_inputs[i].levels << "\n";
+                // std::cout << "tensor " << i << " " << tensor_inputs[i].levels << "\n";
                 flat_inputs[i] = handle_from_tensor(A, _match_levels(A, tensor_inputs[i].tensor, tensor_inputs[i].levels, index_levels));
             }
         }
@@ -2023,14 +2090,14 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     if (requires_getindex) {
         auto self_hdl = handle_from_tensor(A, self_info.tensor);
         auto tup = slice_to_tuple(flat_inputs);
-        std::cout << "calling original getindex " << self_hdl << " " << tup << "\n";
+        // std::cout << "calling original getindex " << self_hdl << " " << tup << "\n";
         auto pytensor = py::object::checked_steal(THPVariable_getitem(self_hdl.ptr(), tup.ptr()));
         rtensor = THPVariable_Unpack(pytensor.ptr());
     } else {
-        std::cout << "skipping original getindex\n";
+        // std::cout << "skipping original getindex\n";
         rtensor = *self_info.tensor;
     }
-    std::cout << "returning (from_positional)\n";
+    // std::cout << "returning (from_positional)\n";
     return Tensor::from_positional(A, std::move(rtensor), result_levels, self_info.has_device);
 }
 
@@ -2045,6 +2112,37 @@ static PyObject* py___getitem__(PyObject *_,
     PY_END(nullptr)
 }
 
+static DimEntry _wrap_dim(Arena& A, py::handle d, size_t N, bool keepdim) {
+    if (Dim::check(d)) {
+        if (keepdim) {
+            py::raise_error(PyExc_ValueError, "cannot preserve first-class dimensions with keepdim=True");
+        }
+        return Dim::unchecked_wrap(d);
+    } else if (py::is_int(d)) {
+        auto i = py::to_int(d);
+        while (i >= 0) {
+            i -= N;
+        }
+        return i;
+    } else {
+        return DimEntry();
+    }
+}
+
+static Slice<DimEntry> _dims(Arena& A, py::handle d, size_t N, bool keepdim) {
+    auto de = _wrap_dim(A, d, N, keepdim);
+    Slice<DimEntry> r;
+    if (!de.is_none()) {
+        r.append(A, de);
+    } else {
+        py::sequence_view sq(d);
+        for (auto i : sq.enumerate()) {
+            r.append(A, _wrap_dim(A, A.autorelease(sq[i]), N, keepdim));
+        }
+    }
+    return r;
+}
+
 struct WrappedOperator : public py::base<WrappedOperator> {
     py::object orig;
     int64_t dim_offset = 0;
@@ -2055,40 +2153,11 @@ struct WrappedOperator : public py::base<WrappedOperator> {
     bool reduce = true;
     static PyTypeObject Type;
     void init() {}
-    DimEntry _wrap_dim(Arena& A, py::handle d, size_t N, bool keepdim) {
-        if (Dim::check(d)) {
-            if (keepdim) {
-                py::raise_error(PyExc_ValueError, "cannot preserve first-class dimensions with keepdim=True");
-            }
-            return Dim::unchecked_wrap(d);
-        } else if (py::is_int(d)) {
-            auto i = py::to_int(d);
-            while (i >= 0) {
-                i -= N;
-            }
-            return i;
-        } else {
-            return DimEntry();
-        }
-    }
-
-    Slice<DimEntry> _dims(Arena& A, py::handle d, size_t N, bool keepdim) {
-        auto de = _wrap_dim(A, d, N, keepdim);
-        Slice<DimEntry> r;
-        if (!de.is_none()) {
-            r.append(A, de);
-        } else {
-            py::sequence_view sq(d);
-            for (auto i : sq.enumerate()) {
-                r.append(A, _wrap_dim(A, A.autorelease(sq[i]), N, keepdim));
-            }
-        }
-        return r;
-    }
 
     py::object run(Arena& A, PyObject *const *args,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
+        std::cout << "_wrapped " << orig << "\n";
         py::tuple_view tv(kwnames);
         auto _getarg = [&](py::handle name, int64_t offset_) -> py::handle {
             auto offset = offset_ + 1; // do not include self
@@ -2129,7 +2198,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
             auto info = TensorInfo::create(A, args[0], true);
             EnableAllLayers l(info.levels);
             patched_args[0] = handle_from_tensor(A, info.batchedtensor);
-            auto r = orig.call_vector(patched_args.begin(), patched_args.end(), kwnames);
+            auto r = orig.call_vector(patched_args.begin(), nargs, kwnames);
             return Tensor::from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device);
         }
 
@@ -2179,7 +2248,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
         }
         _patcharg(dim_name, dim_offset, py_indices);
         patched_args[0] = handle_from_tensor(A, info.tensor);
-        auto r = orig.call_vector(patched_args.begin(), patched_args.end(), kwnames);
+        auto r = orig.call_vector(patched_args.begin(), nargs, kwnames);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())) {
                 return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), new_levels, info.has_device));
@@ -2285,7 +2354,40 @@ static PyObject* _wrap(PyObject * self_,
     PY_END(nullptr)
 }
 
+static PyObject* Tensor_sum(PyObject * self_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    maybeInitializeGlobals();
+    auto self_ = Tensor::unchecked_wrap(args[0]);
+    auto d = self_->delayed();
+    if (!d) {
+        return _Tensor_sum.call_vector((py::handle*)args, nargs, kwnames).release();
+    }
 
+    #define ARGS(_) _(py::handle, self) _(py::handle, dim) _(py::handle, keepdim) \
+                    _(py::handle, dtype)
+    MPY_PARSE_ARGS_KWNAMES("O|OO$O", ARGS)
+    #undef ARGS
+
+    if (dtype.ptr() || (keepdim.ptr() && py::to_bool(keepdim))) {
+        std::cout << "SKIPPING fusion because dtype or keepdim=True specified\n";
+        return _Tensor_sum.call_vector((py::handle*)args, nargs, kwnames).release();
+    }
+    auto levels = self_->levels();
+
+    auto N = ndim_of_levels(levels);
+    auto reduced_dims = _dims(A, dim, N, false);
+    py::tuple_view dargs(d->args);
+    return dot(A, TensorInfo::create(A, dargs[0], false), TensorInfo::create(A, dargs[1], false), reduced_dims).release();
+    PY_END(nullptr)
+}
+
+// extern "C" {
+//     void magic_trace_stop_indicator(void);
+// }
 
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
@@ -2300,7 +2402,9 @@ static PyMethodDef methods[] = {
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
     {"_wrap", (PyCFunction) _wrap, METH_FASTCALL | METH_KEYWORDS},
-
+    {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
+    {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
+    //{"magic_trace_stop_indicator", [](PyObject*,PyObject*) -> PyObject* { magic_trace_stop_indicator(); Py_RETURN_NONE; }, METH_NOARGS},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 

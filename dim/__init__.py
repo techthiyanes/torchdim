@@ -409,6 +409,7 @@ def _bind_one_dim(lhs: 'Dim', rhs: 'Sequence[Dim]'):
 class Tensor(_Tensor, _C.Tensor):
     from_batched = staticmethod(_C.Tensor_from_batched)
     from_positional = staticmethod(_C.Tensor_from_positional)
+    sum = _C._instancemethod(_C.Tensor_sum)
 
 class DelayedMulTensor(_Tensor):
     def __init__(self, lhs, rhs):

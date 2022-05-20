@@ -17,7 +17,7 @@ mintorch_C = CppExtension(
       'dim._C',
       srcs,
       include_dirs = [os.path.dirname(os.path.abspath(__file__)), ft_home],
-      extra_compile_args = { "cxx": ["-Wno-write-strings", "-Wno-sign-compare", "-include-pch", "/raid/zdevito/dumptruck/dim/all_headers.h.pch"] },
+      extra_compile_args = { "cxx": ["-Wno-write-strings", "-Wno-sign-compare"] },
       extra_link_args = [functorch._C.__file__]
 )
 

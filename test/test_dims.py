@@ -12,6 +12,15 @@ import refcycle
 
 from dim._C import _test_c, _n_levels_in_use
 
+from contextlib import contextmanager
+from time import perf_counter
+
+@contextmanager
+def measure(what):
+    b = perf_counter()
+    yield
+    e = perf_counter()
+    print (f"{what}: {e - b:.20f} seconds")
 
 def triu(A):
    i,j = dims()
@@ -231,8 +240,35 @@ class TestMin(TestCase):
         i, j, k = dims()
         A = torch.rand(3, 4)
         B = torch.rand(4, 5)
+
         C = (A[i, k] * B[k, j]).sum(k).positional(i, j)
         assert torch.allclose(C, A @ B)
+
+    def test_time_mm_fuse(self):
+        i, j, k = dims()
+        A = torch.rand(1, 1)
+        B = torch.rand(1, 1)
+
+
+        for _ in range(10):
+            r0 = A + B
+        for _ in range(10):
+            a = A[i, j]
+            b = B[i, j]
+            r1 = a + b
+
+        with measure('pp'):
+            for _ in range(1000):
+                A + B
+        # magic_trace_stop_indicator()
+
+        with measure('fc'):
+            while True:
+                a + b
+        # magic_trace_stop_indicator()
+
+
+        assert torch.allclose(r1.positional(i,j), r0)
 
     def test_compare_dims(self):
         i, j = dims()

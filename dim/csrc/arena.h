@@ -196,14 +196,15 @@ struct Arena {
     : allocated_(0) {}
     template<typename T>
     T* allocate(int n) {
-        if (!n) {
-            return nullptr;
-        }
+        // if (!n) {
+        //     return nullptr;
+        // }
         int to_allocate = sizeof(T)*n;
-        int to_allocate_rounded = ALIGNMENT * ((to_allocate - 1) / ALIGNMENT + 1);
+        //int to_allocate_rounded = ALIGNMENT * ((to_allocate - 1) / ALIGNMENT + 1);
         T* result = (T*) &buffer_[allocated_];
-        allocated_ += to_allocate_rounded;
-        AT_ASSERT(allocated_ <= ARENA_MAX_SIZE);
+        //allocated_ += to_allocate_rounded;
+        allocated_ += to_allocate;
+//        AT_ASSERT(allocated_ <= ARENA_MAX_SIZE);
         return result;
     }
     TensorRef autorelease(at::Tensor s) {
