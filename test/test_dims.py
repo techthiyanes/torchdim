@@ -263,7 +263,8 @@ class TestMin(TestCase):
         # magic_trace_stop_indicator()
 
         with measure('fc'):
-            while True:
+            # while True:
+            for _ in range(1000):
                 a + b
         # magic_trace_stop_indicator()
 

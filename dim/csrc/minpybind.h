@@ -497,6 +497,43 @@ struct dict_view : public handle {
 };
 
 
+struct kwnames_view : public handle {
+    kwnames_view() = default;
+    kwnames_view(handle h) : handle(h) {}
+
+    Py_ssize_t size() const {
+        return PyTuple_GET_SIZE(ptr());
+    }
+
+    irange enumerate() const {
+        return irange(size());
+    }
+
+    const char* operator[](Py_ssize_t i) const {
+        PyObject* obj = PyTuple_GET_ITEM(ptr(), i);
+        return PyUnicode_AsUTF8(obj);
+    }
+
+    static bool check(handle h) {
+        return PyTuple_Check(h.ptr());
+    }
+};
+
+struct vector_args {
+    vector_args(PyObject *const *a,
+                      Py_ssize_t n,
+                      PyObject *k)
+    : args((py::handle*)a), nargs(n), kwnames(k) {}
+    py::handle* args;
+    Py_ssize_t nargs;
+    kwnames_view kwnames;
+    bool has_keywords() const {
+        return kwnames.ptr();
+    }
+};
+
+
+
 
 }
 

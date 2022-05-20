@@ -1181,8 +1181,8 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view a
     }
 }
 
+
 static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
-    maybeInitializeGlobals();
     bool is_pointwise = pointwise.contains(orig);
 
     if (orig == torch_Tensor___mul__) {
@@ -1214,6 +1214,8 @@ static PyObject* py___torch_function__(PyObject *self,
                       PyObject *kwnames) {
     Arena A;
     PY_BEGIN
+    maybeInitializeGlobals();
+
     if (nargs == 4) {
         // cls orig cls2 args NONE
         return __torch_function__(A, args[1], py::tuple_view(args[3]), empty_dict).release();
@@ -1571,11 +1573,13 @@ static PyObject* test_c(PyObject *self,
     PY_END(nullptr);
 }
 
+
 static PyObject* call_torch_function(PyObject* self, PyObject* args, PyObject* kwargs) {
     PY_BEGIN
-    auto orig = py::handle(PyTuple_GET_ITEM(self, 0));
-    auto torch_function = py::handle(PyTuple_GET_ITEM(self, 1));
-    return torch_function.call(orig, py::handle(Py_None), py::handle(args), py::handle(kwargs)).release();
+    Arena A;
+    maybeInitializeGlobals();
+    AT_ASSERT(self);
+    return __torch_function__(A, self, py::tuple_view(args), kwargs ? kwargs : empty_dict).release();
     PY_END(nullptr)
 }
 
@@ -1588,10 +1592,9 @@ static PyObject* _wrap_method(PyObject *self,
                       PyObject *kwnames) {
     PY_BEGIN
     AT_ASSERT(nargs == 2);
-    py::tuple s(2);
-    s.set(0, py::object::borrow(args[0]));
-    s.set(1, py::object::borrow(args[1]));
-    auto r = py::object::checked_steal(PyCFunction_New(&wrapper_method, s.release()));
+    // XXX - ignore python function wrapped, we will call torch function directly
+    py::object orig = py::object::borrow(args[0]);
+    auto r = py::object::checked_steal(PyCFunction_New(&wrapper_method, orig.release()));
     return PyInstanceMethod_New(r.release());
     PY_END(nullptr);
 }
