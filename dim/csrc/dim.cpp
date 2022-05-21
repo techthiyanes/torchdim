@@ -93,6 +93,11 @@ struct Dim : public py::base<Dim> {
         name_ = std::move(name);
         size_ = s;
     }
+
+    static bool check_exact(py::handle v) {
+        return Py_TYPE(v.ptr()) == DimType;
+    }
+
     int64_t size() const {
         if (size_ == -1) {
             py::raise_error(PyExc_ValueError, "dimension %S is unbound", name_.ptr());
@@ -661,6 +666,11 @@ public:
     }
     static PyTypeObject Type;
 
+    static bool check_exact(py::handle v) {
+       return Py_TYPE(v.ptr()) == TensorType;
+    }
+
+
     static py::obj<Tensor> create() {
         if (!TensorType) {
             TensorType = (PyTypeObject*) py::import("dim").attr("Tensor").ptr();
@@ -754,9 +764,12 @@ struct TensorInfo {
     }
 
     static TensorInfo create(Arena& A, py::handle h, bool ensure_batched=true, bool ensure_present=true) {
-        if (Tensor::check(h)) {
+        if (Tensor::check_exact(h)) {
             auto t = Tensor::unchecked_wrap(h);
             return TensorInfo {t->tensor(A), t->levels(), t->has_device(), ensure_batched ? t->batchtensor(A) : TensorRef()};
+        } else if (Dim::check_exact(h)) {
+            auto d = Dim::unchecked_wrap(h);
+            return TensorInfo {d->range(), Slice<DimEntry>(A, DimEntry(d)), false, ensure_batched ? d->batchtensor() : TensorRef()};
         } else if (THPVariable_Check(h.ptr())) {
             TensorRef t = unchecked_tensor_from(h);
             Slice<DimEntry> levels;
@@ -764,13 +777,6 @@ struct TensorInfo {
                 levels.append(A, i);
             }
             return TensorInfo {t, levels, true, t};
-        } else if (Dim::check(h)) {
-            auto d = Dim::unchecked_wrap(h);
-            return TensorInfo {d->range(), Slice<DimEntry>(A, DimEntry(d)), false, ensure_batched ? d->batchtensor() : TensorRef()};
-        } else if (py::isinstance(h, DelayedMulTensor)) {
-            auto batchtensor = h.attr("_batchtensor");
-            auto has_device = py::to_bool_unsafe(h.attr("_has_device"));
-            return create(A, batchtensor, has_device);
         } else {
             if (ensure_present) {
                 py::raise_error(PyExc_ValueError, "expected a tensor object");
