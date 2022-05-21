@@ -591,15 +591,37 @@ static int DimList_init(DimList *self, PyObject *args, PyObject *kwds) {
 
 PyTypeObject* TensorType = nullptr; // the python wrapper type.
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_);
-static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_, bool is_pointwise);
+static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args args, bool is_pointwise);
 void free_levels_dims(Slice<DimEntry> levels);
 
 struct Tensor;
 
 struct DelayedOperator {
+    DelayedOperator(py::object o, py::vector_args a)
+    : orig(std::move(o)), args(a) {
+        auto all = a.size();
+        // this will outlive the call so
+        // take ownership of temporaries
+        // in vector args
+        auto buf = new py::handle[all];
+        memcpy(buf, args.args, sizeof(py::handle)*all);
+        args.args = buf;
+        for (auto i : args.enumerate_all()) {
+            Py_INCREF(args.args[i].ptr());
+        }
+        Py_XINCREF(args.kwnames.ptr());
+    }
+    ~DelayedOperator() {
+        for (auto i : args.enumerate_all()) {
+            Py_DECREF(args[i].ptr());
+        }
+        if (args.has_keywords()) {
+            Py_XDECREF(args.kwnames.ptr());
+        }
+        delete [] args.args;
+    }
     py::object orig;
-    py::object args;
-    py::object kwargs;
+    py::vector_args args;
 };
 
 struct Tensor : public py::base<Tensor> {
@@ -613,7 +635,7 @@ public:
     at::Tensor& tensor(Arena& A) {
         if (!tensor_.defined()) {
             AT_ASSERT(delayed_);
-            auto t = Tensor::wrap(run_torch_function(A, delayed_->orig, delayed_->args, delayed_->kwargs, true));
+            auto t = Tensor::wrap(run_torch_function(A, delayed_->orig, delayed_->args, true));
             tensor_ = t->tensor(A);
             delayed_.reset();
             // don't force creation of batch tensor if it wasn't alreay provided.
@@ -656,7 +678,7 @@ public:
     }
     static py::obj<Tensor> from_batched(Arena& A, at::Tensor batched, bool has_device);
     static py::object from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device);
-    static py::obj<Tensor> create_delayed(py::object op, py::object args, py::object kwargs, Slice<DimEntry> levels, bool has_device);
+    static py::obj<Tensor> create_delayed(py::object op, py::vector_args args, Slice<DimEntry> levels, bool has_device);
 };
 
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
@@ -868,11 +890,11 @@ static PyObject* py_Tensor_from_positional(PyObject *self,
     PY_END(nullptr)
 }
 
-py::obj<Tensor> Tensor::create_delayed(py::object op, py::object args, py::object kwargs, Slice<DimEntry> levels, bool has_device) {
+py::obj<Tensor> Tensor::create_delayed(py::object op, py::vector_args args, Slice<DimEntry> levels, bool has_device) {
     py::obj<Tensor> self = Tensor::create();
     self->capture_levels(levels);
     self->has_device_ = has_device;
-    self->delayed_ = std::make_unique<DelayedOperator>(DelayedOperator {std::move(op), std::move(args), std::move(kwargs)});
+    self->delayed_ = std::make_unique<DelayedOperator>(op, args);
     return self;
 }
 
@@ -965,6 +987,41 @@ Unflatten tree_flatten(Arena& A, py::handle agg, Slice<py::handle>& flat_element
     }
     return Unflatten {utype, obj, c};
 }
+
+struct UnflattenVectorArgs {
+    py::vector_args operator()(Arena& A, Slice<py::handle>& elements) {
+        if (!had_nested) {
+            auto args = elements.begin();
+            elements = Slice<py::handle>();
+            return py::vector_args(args, nargs, kwnames);
+        }
+        Slice<py::handle> args;
+        for (auto u : children) {
+            args.append(A, A.autorelease(u(elements)));
+        }
+        return py::vector_args(args.begin(), nargs, kwnames);
+    }
+    Slice<Unflatten> children;
+    Py_ssize_t nargs;
+    py::handle kwnames;
+    bool had_nested;
+};
+
+UnflattenVectorArgs tree_flatten(Arena& A, py::vector_args args, Slice<py::handle>& flat_elements) {
+    UnflattenVectorArgs r;
+    r.kwnames = args.kwnames;
+    r.nargs = args.nargs;
+    r.had_nested = false;
+
+    for (auto i : args.enumerate_all()) {
+        r.children.append(A, tree_flatten(A, args[i], flat_elements));
+        if (r.children.back().type != U_ELEM) {
+            r.had_nested = true;
+        }
+    }
+    return r;
+}
+
 
 struct UnflattenArena {
     Arena A;
@@ -1103,13 +1160,12 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
 }
 
 
-static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_, bool is_pointwise) {
-    //std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
+static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args args, bool is_pointwise) {
+    // std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
+
     Slice<py::hdl<Dim>> all_dims;
     Slice<py::handle> flat_args;
-    auto unflatten_args = tree_flatten(A, args_, flat_args);
-    auto unflatten_kwargs = tree_flatten(A, kwargs_, flat_args);
-
+    auto unflatten_args = tree_flatten(A, args, flat_args);
     TensorRef device_holding_tensor;
 
     Slice<TensorInfo> infos;
@@ -1143,9 +1199,9 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view a
         }
 
         Slice<py::handle> flat_it = flat_args;
-        py::object uargs = unflatten_args(flat_it);
-        py::object ukwargs = unflatten_kwargs(flat_it);
-        py::object result = orig.call_object(uargs, ukwargs);
+        py::vector_args uargs = unflatten_args(A, flat_it);
+
+        py::object result = orig.call_vector(uargs);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())){
                 return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), result_levels, device_holding_tensor));
@@ -1166,11 +1222,9 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view a
             }
         }
         Slice<py::handle> flat_it = flat_args;
-        py::object uargs = unflatten_args(flat_it);
-        py::object ukwargs = unflatten_kwargs(flat_it);
-        // std::cout << uargs << " "  << ukwargs << "\n";
+        py::vector_args uargs = unflatten_args(A, flat_it);
         AT_ASSERT(flat_it.size() == 0);
-        py::object result = orig.call_object(uargs, ukwargs);
+        py::object result = orig.call_vector(uargs);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())) {
                 return A.autorelease(Tensor::from_batched(A, THPVariable_Unpack(h.ptr()), device_holding_tensor));
@@ -1182,16 +1236,18 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::tuple_view a
 }
 
 
-static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view args_, py::handle kwargs_) {
+static py::object __torch_function__(Arena &A, py::handle orig, py::vector_args args) {
     bool is_pointwise = pointwise.contains(orig);
 
     if (orig == torch_Tensor___mul__) {
-        AT_ASSERT(args_.size() == 2);
-        if (py::isinstance(args_[0], _Tensor) && py::isinstance(args_[1], _Tensor) && _Tensor_ndim(args_[0]) == 0 && _Tensor_ndim(args_[1]) == 0) {
+        AT_ASSERT(args.nargs == 2 && !args.has_keywords());
+        auto lhs = args[0];
+        auto rhs = args[1];
+        if (py::isinstance(lhs, _Tensor) && py::isinstance(rhs, _Tensor) && _Tensor_ndim(lhs) == 0 && _Tensor_ndim(rhs) == 0) {
             bool has_device = false;
             Slice<DimEntry> levels;
-            for (auto i : args_.enumerate()) {
-                auto t = TensorInfo::create(A, args_[i], false);
+            for (auto i : args.enumerate_positional()) {
+                auto t = TensorInfo::create(A, args[i], false);
                 has_device = has_device || t.has_device;
                 for (auto l : t.levels) {
                     if (!levels.contains(l)) {
@@ -1200,13 +1256,30 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::tuple_view a
                 }
             }
             // std::cout << "__torch_function__ " << "delay" << " " << orig << "\n";
-            return Tensor::create_delayed(py::object::borrow(orig), py::object::borrow(args_), py::object::borrow(kwargs_), levels, has_device);
-            return DelayedMulTensor.call_object(args_);
+            return Tensor::create_delayed(py::object::borrow(orig), args, levels, has_device);
         }
     }
-    return run_torch_function(A, orig, args_, kwargs_, is_pointwise);
+    return run_torch_function(A, orig, args, is_pointwise);
 }
 
+py::vector_args as_vector_args(Arena& A, py::handle args, py::handle kwargs) {
+    auto pos_args = (py::handle*) &PyTuple_GET_ITEM(args.ptr(), 0);
+    auto pos_n = PyTuple_GET_SIZE(args.ptr());
+    if (!kwargs.ptr()) {
+        return py::vector_args(pos_args, pos_n, nullptr);
+    }
+    Slice<py::handle> all_args;
+    Slice<py::handle> kwnames;
+    all_args.extend(A, pos_args, pos_args + pos_n);
+    py::dict_view dv(kwargs);
+    Py_ssize_t pos = 0;
+    py::handle key, value;
+    while (dv.next(&pos, &key, &value)) {
+        all_args.append(A, value);
+        kwnames.append(A, key);
+    }
+    return py::vector_args(all_args.begin(), pos_n, A.autorelease(slice_to_tuple(kwnames)));
+}
 
 static PyObject* py___torch_function__(PyObject *self,
                       PyObject *const *args,
@@ -1215,14 +1288,9 @@ static PyObject* py___torch_function__(PyObject *self,
     Arena A;
     PY_BEGIN
     maybeInitializeGlobals();
-
-    if (nargs == 4) {
-        // cls orig cls2 args NONE
-        return __torch_function__(A, args[1], py::tuple_view(args[3]), empty_dict).release();
-    } else {
-        AT_ASSERT(nargs == 5);
-        return __torch_function__(A, args[1], py::tuple_view(args[3]), args[4]).release();
-    }
+    AT_ASSERT(nargs == 4 || nargs == 5);
+    auto va = as_vector_args(A, args[3], nargs == 5 ? args[4] : nullptr);
+    return __torch_function__(A, args[1], std::move(va)).release();
     PY_END(nullptr)
 }
 
@@ -1574,16 +1642,18 @@ static PyObject* test_c(PyObject *self,
 }
 
 
-static PyObject* call_torch_function(PyObject* self, PyObject* args, PyObject* kwargs) {
+static PyObject* call_torch_function(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
     PY_BEGIN
     Arena A;
     maybeInitializeGlobals();
-    AT_ASSERT(self);
-    return __torch_function__(A, self, py::tuple_view(args), kwargs ? kwargs : empty_dict).release();
+    return __torch_function__(A, self, py::vector_args(args, nargs, kwnames)).release();
     PY_END(nullptr)
 }
 
-PyMethodDef wrapper_method =  {"wrapper", (PyCFunction) call_torch_function, METH_VARARGS | METH_KEYWORDS };
+PyMethodDef wrapper_method =  {"wrapper", (PyCFunction) call_torch_function, METH_FASTCALL | METH_KEYWORDS };
 
 
 static PyObject* _wrap_method(PyObject *self,
@@ -1706,7 +1776,7 @@ static PyObject* expand(PyObject *_,
         if (!Dim::check(args[i])) {
             maybeInitializeGlobals();
             auto newargs = slice_to_tuple(Slice<py::handle>((py::handle*)args - 1, (py::handle*)args + nargs));
-            return __torch_function__(A, torch_Tensor_expand, newargs, empty_dict).release();
+            return __torch_function__(A, torch_Tensor_expand, py::vector_args(args - 1, nargs + 1, kwnames)).release();
         }
     }
     at::Tensor& data = self->tensor(A);
@@ -2160,7 +2230,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
     py::object run(Arena& A, PyObject *const *args,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
-        std::cout << "_wrapped " << orig << "\n";
+        // std::cout << "_wrapped " << orig << "\n";
         py::tuple_view tv(kwnames);
         auto _getarg = [&](py::handle name, int64_t offset_) -> py::handle {
             auto offset = offset_ + 1; // do not include self
@@ -2383,8 +2453,8 @@ static PyObject* Tensor_sum(PyObject * self_,
 
     auto N = ndim_of_levels(levels);
     auto reduced_dims = _dims(A, dim, N, false);
-    py::tuple_view dargs(d->args);
-    return dot(A, TensorInfo::create(A, dargs[0], false), TensorInfo::create(A, dargs[1], false), reduced_dims).release();
+
+    return dot(A, TensorInfo::create(A, d->args[0], false), TensorInfo::create(A, d->args[1], false), reduced_dims).release();
     PY_END(nullptr)
 }
 

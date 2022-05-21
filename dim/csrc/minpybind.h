@@ -41,6 +41,7 @@ struct exception_set {
 };
 
 struct object;
+struct vector_args;
 
 struct handle {
     handle(PyObject* ptr)
@@ -62,6 +63,7 @@ struct handle {
     object call_object(py::handle args);
     object call_object(py::handle args, py::handle kwargs);
     object call_vector(py::handle* begin, Py_ssize_t nargs, py::handle kwnames);
+    object call_vector(vector_args args);
     bool operator==(handle rhs) {
         return ptr_ == rhs.ptr_;
     }
@@ -523,16 +525,36 @@ struct vector_args {
     vector_args(PyObject *const *a,
                       Py_ssize_t n,
                       PyObject *k)
+    : vector_args((py::handle*)a, n, k) {}
+    vector_args(py::handle* a,
+                    Py_ssize_t n,
+                    py::handle k)
     : args((py::handle*)a), nargs(n), kwnames(k) {}
     py::handle* args;
     Py_ssize_t nargs;
     kwnames_view kwnames;
+
+    py::handle operator[](int64_t i) const {
+        return args[i];
+    }
     bool has_keywords() const {
         return kwnames.ptr();
+    }
+    irange enumerate_positional() {
+        return irange(nargs);
+    }
+    irange enumerate_all() {
+        return irange(size());
+    }
+    int64_t size() const {
+        return nargs + (has_keywords() ? kwnames.size() : 0);
     }
 };
 
 
+inline object handle::call_vector(vector_args args) {
+    return object::checked_steal(_PyObject_Vectorcall(ptr(), (PyObject*const*) args.args, args.nargs, args.kwnames.ptr()));
+}
 
 
 }

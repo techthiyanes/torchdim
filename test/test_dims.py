@@ -218,7 +218,9 @@ class TestMin(TestCase):
 
         a,b,c = C.split((3, 3, 1), dim=1)
         s = dims()
-        for a,b,d in zip(C.split((3,3,1), dim=1),  C[s,c_].split((x,y,z), dim=c_), (x,y,z)):
+        ref = C.split((3,3,1), dim=1)
+        t = C[s,c_].split((x,y,z), dim=c_)
+        for a,b,d in zip(ref, t, (x,y,z)):
             assert torch.allclose(a, b.positional(s,d))
 
         D = torch.rand(3, 4, 5)
@@ -258,14 +260,16 @@ class TestMin(TestCase):
             r1 = a + b
 
         with measure('pp'):
-            for _ in range(1000):
+            for _ in range(10000):
                 A + B
         # magic_trace_stop_indicator()
 
         with measure('fc'):
-            # while True:
-            for _ in range(1000):
+            for _ in range(10000):
+
                 a + b
+        # while True:
+        #         a + b
         # magic_trace_stop_indicator()
 
 
