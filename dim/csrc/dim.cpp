@@ -1165,7 +1165,6 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
     return A.autorelease(v->as_strided(at::IntArrayRef(nsz.begin(), nsz.end()), at::IntArrayRef(nsd.begin(), nsd.end()), v->storage_offset()));
 }
 
-
 static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args args, bool is_pointwise) {
     // std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
 
@@ -1208,6 +1207,11 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
         py::vector_args uargs = unflatten_args(A, flat_it);
 
         py::object result = orig.call_vector(uargs);
+
+        // fast wrap for normal case where operator just returns a tensor.
+        if (THPVariable_Check(result.ptr())) {
+            return Tensor::from_positional(A, THPVariable_Unpack(result.ptr()), result_levels, device_holding_tensor);
+        }
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())){
                 return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), result_levels, device_holding_tensor));
@@ -1237,6 +1241,9 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
             }
             return h;
         };
+        if (THPVariable_Check(result.ptr())) {
+            return Tensor::from_batched(A, THPVariable_Unpack(result.ptr()), device_holding_tensor);
+        }
         return tree_map(A, wrap, result);
     }
 }
