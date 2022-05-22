@@ -1242,9 +1242,7 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
 }
 
 
-static py::object __torch_function__(Arena &A, py::handle orig, py::vector_args args) {
-    bool is_pointwise = pointwise.contains(orig);
-
+static py::object __torch_function__(Arena &A, py::handle orig, py::vector_args args, bool is_pointwise) {
     if (orig == torch_Tensor___mul__) {
         AT_ASSERT(args.nargs == 2 && !args.has_keywords());
         auto lhs = args[0];
@@ -1296,7 +1294,8 @@ static PyObject* py___torch_function__(PyObject *self,
     maybeInitializeGlobals();
     AT_ASSERT(nargs == 4 || nargs == 5);
     auto va = as_vector_args(A, args[3], nargs == 5 ? args[4] : nullptr);
-    return __torch_function__(A, args[1], std::move(va)).release();
+    bool is_pointwise = pointwise.contains(args[1]);
+    return __torch_function__(A, args[1], std::move(va), is_pointwise).release();
     PY_END(nullptr)
 }
 
@@ -1648,6 +1647,7 @@ static PyObject* test_c(PyObject *self,
 }
 
 
+template<bool is_pointwise>
 static PyObject* call_torch_function(PyObject *self,
                       PyObject *const *args,
                       Py_ssize_t nargs,
@@ -1655,11 +1655,12 @@ static PyObject* call_torch_function(PyObject *self,
     PY_BEGIN
     Arena A;
     maybeInitializeGlobals();
-    return __torch_function__(A, self, py::vector_args(args, nargs, kwnames)).release();
+    return __torch_function__(A, self, py::vector_args(args, nargs, kwnames), is_pointwise).release();
     PY_END(nullptr)
 }
 
-PyMethodDef wrapper_method =  {"wrapper", (PyCFunction) call_torch_function, METH_FASTCALL | METH_KEYWORDS };
+PyMethodDef wrapper_method =  {"wrapper", (PyCFunction) call_torch_function<false>, METH_FASTCALL | METH_KEYWORDS };
+PyMethodDef wrapper_method_pw =  {"wrapper", (PyCFunction) call_torch_function<true>, METH_FASTCALL | METH_KEYWORDS };
 
 
 static PyObject* _wrap_method(PyObject *self,
@@ -1669,8 +1670,13 @@ static PyObject* _wrap_method(PyObject *self,
     PY_BEGIN
     AT_ASSERT(nargs == 2);
     // XXX - ignore python function wrapped, we will call torch function directly
-    py::object orig = py::object::borrow(args[0]);
-    auto r = py::object::checked_steal(PyCFunction_New(&wrapper_method, orig.release()));
+    py::handle orig = args[0];
+    if (!pointwise.ptr()) {
+        auto dim = py::import("dim");
+        pointwise = dim.attr("pointwise");
+    }
+    bool is_pointwise = pointwise.contains(orig);
+    auto r = py::object::checked_steal(PyCFunction_New(is_pointwise ? &wrapper_method_pw : &wrapper_method, orig.ptr()));
     return PyInstanceMethod_New(r.release());
     PY_END(nullptr);
 }
@@ -1782,7 +1788,7 @@ static PyObject* expand(PyObject *_,
         if (!Dim::check(args[i])) {
             maybeInitializeGlobals();
             auto newargs = slice_to_tuple(Slice<py::handle>((py::handle*)args - 1, (py::handle*)args + nargs));
-            return __torch_function__(A, torch_Tensor_expand, py::vector_args(args - 1, nargs + 1, kwnames)).release();
+            return __torch_function__(A, torch_Tensor_expand, py::vector_args(args - 1, nargs + 1, kwnames), false).release();
         }
     }
     at::Tensor& data = self->tensor(A);
