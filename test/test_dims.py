@@ -268,9 +268,13 @@ class TestMin(TestCase):
         with measure('fc'):
             for _ in range(10000):
                 a + b
+        with measure('fcall'):
+            for _ in range(10000):
+                (A[i, j] + B[i, j]).positional(i, j)
         with magic_trace():
             for _ in range(10000):
-                a + b
+                (A[i, j] + B[i, j]).positional(i, j)
+
         # magic_trace_stop_indicator()
 
 
