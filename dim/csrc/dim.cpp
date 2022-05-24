@@ -28,7 +28,6 @@ namespace functorch {
     void _vmap_remove_layers(int N);
 }
 }
-int whooo;
 
 py::handle empty_dict;
 py::handle torch_Tensor___mul__;
@@ -40,6 +39,7 @@ py::dict_view pointwise;
 py::handle torch_Tensor_expand;
 binaryfunc THPVariable_getitem;
 py::handle no_slice;
+PyTypeObject* torch_Tensor;
 
 static void maybeInitializeGlobals() {
     if (empty_dict.ptr()) {
@@ -48,6 +48,7 @@ static void maybeInitializeGlobals() {
     auto torch = py::import("torch");
     auto dim = py::import("dim");
     empty_dict = PyDict_New();
+    torch_Tensor = (PyTypeObject*) torch.attr("Tensor").ptr();
     torch_Tensor___mul__ = torch.attr("Tensor").attr("__mul__");
     _Tensor = dim.attr("_Tensor");
     DelayedMulTensor = dim.attr("DelayedMulTensor");
@@ -1018,13 +1019,27 @@ UnflattenVectorArgs tree_flatten(Arena& A, py::vector_args args, Slice<py::handl
     r.kwnames = args.kwnames;
     r.nargs = args.nargs;
     r.had_nested = false;
-
-    for (auto i : args.enumerate_all()) {
-        r.children.append(A, tree_flatten(A, args[i], flat_elements));
-        if (r.children.back().type != U_ELEM) {
-            r.had_nested = true;
+    auto N = args.size();
+    for(auto i : irange(N)) {
+        auto typ = Py_TYPE(args[i].ptr());
+        // fast checks that this thing isn't something that is nested.
+        bool is_element = !typ->tp_as_sequence ||  typ == torch_Tensor || typ == TensorType || typ == DimType;
+        if (!is_element) {
+            flat_elements.extend(A, args.args, args.args + i);
+            for (auto j : irange(i)) {
+                (void)j;
+                r.children.append(A, Unflatten {U_ELEM});
+            }
+            for (auto j : irange(i, N)) {
+                r.children.append(A, tree_flatten(A, args[j], flat_elements));
+                if (r.children.back().type != U_ELEM) {
+                    r.had_nested = true;
+                }
+            }
+            return r;
         }
     }
+    flat_elements.extend(A, args.args, args.args + N);
     return r;
 }
 
@@ -2477,10 +2492,6 @@ static PyObject* Tensor_sum(PyObject * self_,
     PY_END(nullptr)
 }
 
-// extern "C" {
-//     void magic_trace_stop_indicator(void);
-// }
-
 static PyMethodDef methods[] = {
     {"dims", (PyCFunction) dims, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
@@ -2496,7 +2507,6 @@ static PyMethodDef methods[] = {
     {"_wrap", (PyCFunction) _wrap, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
-    //{"magic_trace_stop_indicator", [](PyObject*,PyObject*) -> PyObject* { magic_trace_stop_indicator(); Py_RETURN_NONE; }, METH_NOARGS},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 

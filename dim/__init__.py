@@ -9,6 +9,7 @@ from .wrap_type import wrap_type
 import dim._C as _C
 from dim._C import dims, DimList
 
+
 class DimensionMismatchError(Exception):
     pass
 

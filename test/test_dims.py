@@ -14,6 +14,7 @@ from dim._C import _test_c, _n_levels_in_use
 
 from contextlib import contextmanager
 from time import perf_counter
+from dim.magic_trace import magic_trace
 
 @contextmanager
 def measure(what):
@@ -267,8 +268,9 @@ class TestMin(TestCase):
         with measure('fc'):
             for _ in range(10000):
                 a + b
-        while True:
-            a + b
+        with magic_trace():
+            for _ in range(10000):
+                a + b
         # magic_trace_stop_indicator()
 
 

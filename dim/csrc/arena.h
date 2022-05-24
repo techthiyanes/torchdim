@@ -3,8 +3,8 @@
 #include "minpybind.h"
 
 
-inline int round2(int num) {
-   int nzeros = __builtin_clz(num - 1);
+inline int round2min8(int num) {
+   int nzeros = __builtin_clz((num - 1)|4);
    return 1 << (32 - nzeros);
 }
 
@@ -60,9 +60,7 @@ struct Slice {
         return insert(arena, slice(where, where), v);
     }
     void append(Arena& arena, T value);
-    void extend(Arena& arena, Slice to_insert) {
-        return insert(arena, slice(size_), to_insert);
-    }
+    void extend(Arena& arena, Slice to_insert);
     void extend(Arena& arena, const T* begin, const T* end) {
         return extend(arena, Slice<T>((T*)begin, (T*)end));
     }
@@ -242,18 +240,20 @@ inline void Slice<T>::insert(Arena& arena, Slice where, Slice to_insert) {
         int new_size = size() - where.size() + to_insert.size();
         T* tail_dest = where.begin() + to_insert.size();
         if (new_size >= capacity_) {
-            int new_capacity = new_size ? round2(new_size) : 0;
+            int new_capacity = new_size ? round2min8(new_size) : 0;
             result.capacity_ = new_capacity;
             result.begin_ = arena.allocate<T>(new_capacity);
             body_dest = result.begin_ + (where.begin() - begin());
             tail_dest = body_dest + to_insert.size();
-            std::memcpy(result.begin_, begin_, sizeof(T)*(where.begin() - begin()));
+            //std::memcpy(result.begin_, begin_, sizeof(T)*(where.begin() - begin()));
+            std::copy(begin_, begin_ + (where.begin() - begin()), result.begin_);
         }
         std::memmove(tail_dest, where.end(), sizeof(T)*(end() - where.end()));
         result.size_ = new_size;
     }
 
-    std::memcpy(body_dest, to_insert.begin(), sizeof(T)*to_insert.size());
+    //std::memcpy(body_dest, to_insert.begin(), sizeof(T)*to_insert.size());
+    std::copy(to_insert.begin(), to_insert.end(), body_dest);
     *this = result;
 }
 
@@ -261,13 +261,31 @@ template<typename T>
 inline void Slice<T>::append(Arena& arena, T value) {
     Slice result = *this;
     if (size_ == capacity_) {
-        int new_size = size_ ? round2(size_)*2 : 8;
+        int new_size = size_ ? round2min8(size_)*2 : 8;
         T* n = arena.allocate<T>(new_size);
-        memcpy(n, begin_, size_*sizeof(T));
+        //memcpy(n, begin_, size_*sizeof(T));
+        std::copy(begin_, begin_ + size_, n);
         result.begin_ = n;
         result.capacity_ = new_size;
     }
     result[result.size_++] = std::move(value);
+    *this = result;
+}
+
+template<typename T>
+inline void Slice<T>::extend(Arena& arena, Slice<T> rhs) {
+    Slice result = *this;
+    result.size_ = size_ + rhs.size();
+    if (result.size_ > capacity_) {
+        int new_size = round2min8(result.size_);
+        T* n = arena.allocate<T>(new_size);
+        //memcpy(n, begin_, size_*sizeof(T));
+        std::copy(begin_, begin_+size_, n);
+        result.begin_ = n;
+        result.capacity_ = new_size;
+    }
+    //memcpy(result.begin_ + size_, rhs.begin(), sizeof(T)*rhs.size());
+    std::copy(rhs.begin(), rhs.end(), result.begin_ + size_);
     *this = result;
 }
 
@@ -279,7 +297,7 @@ Slice<T>::Slice(Arena& arena, Args&&... args) {
     for (auto i : lens) {
         size_ += i;
     }
-    capacity_ = round2(std::max(size_, 8));
+    capacity_ = round2min8(size_);
     begin_ = arena.allocate<T>(capacity_);
     T* dst_ = begin_;
     T* unused[] = {_insert(dst_, args)...};
