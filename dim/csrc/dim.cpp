@@ -1158,13 +1158,14 @@ private:
     int64_t N;
 };
 
-TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slice<DimEntry> to_levels) {
+TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slice<DimEntry> to_levels, bool drop_levels=false) {
     if (from_levels == to_levels) {
         return v;
     }
+    // drop_levels -> if a dim appears in from_levels but not to_levels, it is assumed it has stride 0.
     at::IntArrayRef sz = v->sizes();
     at::IntArrayRef sd = v->strides();
-    AT_ASSERT(from_levels.size() <= to_levels.size());
+    AT_ASSERT(drop_levels || from_levels.size() <= to_levels.size());
     Slice<int64_t> nsz;
     Slice<int64_t> nsd;
     for (auto l : to_levels) {
@@ -1477,19 +1478,14 @@ int64_t dim_index(const std::vector<py::obj<Dim>>& dims, py::hdl<Dim> dim) {
     return -1;
 }
 
-struct SizeStride {
-    Slice<int64_t> sizes;
-    Slice<int64_t> strides;
-    void append(Arena & A, int64_t sz, int64_t sd) {
-        sizes.append(A, sz);
-        strides.append(A, sd);
-    }
-};
 
-struct DotParts {
-    SizeStride batch; // dimension appear in lhs and rhs, not summed
-    SizeStride reduce; // dimension appear in lhs and rhs, summend
-    SizeStride only; // dimension appear in just the lhs or just the right hand size
+struct DotPart {
+    Slice<DimEntry> dims;
+    size_t total_size = 1;
+    void append(Arena& A, py::hdl<Dim> d) {
+        total_size *= d->size();
+        dims.append(A, d);
+    }
 };
 
 template<typename T>
@@ -1497,56 +1493,78 @@ static at::ArrayRef<T> as_array_ref(Slice<T> t) {
     return at::ArrayRef<T>(t.begin(), t.end());
 }
 
+TensorRef dot_prepare(Arena& A, std::initializer_list<DotPart> parts, const TensorInfo& t) {
+    Slice<DimEntry> new_levels;
+    bool needs_reshape = false;
+    for (auto p : parts) {
+        if (p.dims.size() != 1) {
+            needs_reshape = true;
+        }
+        new_levels.extend(A, p.dims);
+    }
+    auto r = _match_levels(A, t.tensor, t.levels, new_levels, true);
+    if (!needs_reshape) {
+        return r;
+    }
+    Slice<int64_t> view;
+    for (auto p : parts) {
+        view.append(A, p.total_size);
+    }
+    return A.autorelease(r->reshape(at::IntArrayRef(view.begin(), view.end())));
+}
+
+py::object dot_finish(Arena& A, std::initializer_list<DotPart> parts, at::Tensor r) {
+    Slice<DimEntry> result_levels;
+    bool needs_reshape = false;
+    for (auto p : parts) {
+        if (p.dims.size() != 1) {
+            needs_reshape = true;
+        }
+        result_levels.extend(A, p.dims);
+    }
+    if (needs_reshape) {
+        Slice<int64_t> new_size;
+        for (auto l : result_levels) {
+            new_size.append(A, l.dim()->size());
+        }
+        r = r.reshape(at::IntArrayRef(new_size.begin(), new_size.end()));
+    }
+    return Tensor::from_positional(A, std::move(r), result_levels, true);
+}
+
+
+
 py::object dot(Arena& A, TensorInfo lhs, TensorInfo rhs, Slice<DimEntry> sum) {
 
     auto lhs_strides = lhs.tensor->strides();
     auto rhs_strides = rhs.tensor->strides();
 
-    int64_t lro_size = 1;
-    int64_t lo_size = 1;
-    int64_t ro_size = 1;
-    int64_t lr_size = 1;
-
-    DotParts lhs_dims;
-    DotParts rhs_dims;
-
-    Slice<DimEntry> batch_dims;
-    Slice<DimEntry> lo_dims;
-    Slice<DimEntry> ro_dims;
-
+    DotPart lro_dims;
+    DotPart lo_dims;
+    DotPart ro_dims;
+    DotPart lr_dims;
 
     auto insert_dim = [&] (py::hdl<Dim> d, at::optional<int> lhs_idx, at::optional<int> rhs_idx) {
         bool reduced = sum.contains(d);
-        int64_t size = d->size();
         int64_t lhs_stride = lhs_idx ? lhs_strides[*lhs_idx] : 0;
         int64_t rhs_stride = rhs_idx ? rhs_strides[*rhs_idx] : 0;
         if (reduced) {
             // lr
-            lr_size *= size;
-            lhs_dims.reduce.append(A, size, lhs_stride);
-            rhs_dims.reduce.append(A, size, rhs_stride);
+            lr_dims.append(A, d);
         } else {
             if ((lhs_stride == 0) == (rhs_stride == 0)) {
                 // lro
-                lhs_dims.batch.append(A, size, lhs_stride);
-                rhs_dims.batch.append(A, size, rhs_stride);
-                batch_dims.append(A, d);
-                lro_size *= size;
+                lro_dims.append(A, d);
             } else if (lhs_stride != 0) {
                 // lo
-                lhs_dims.only.append(A, size, lhs_stride);
-                lo_size *= size;
                 lo_dims.append(A, d);
             } else {
                 AT_ASSERT(rhs_stride != 0);
-                // ro
-                rhs_dims.only.append(A, size, rhs_stride);
-                ro_size *= size;
                 ro_dims.append(A, d);
-
             }
         }
     };
+
 
     auto rhs_seen = A.allocate<bool>(rhs.levels.size());
     std::fill(rhs_seen, rhs_seen + rhs.levels.size(), false);
@@ -1568,53 +1586,28 @@ py::object dot(Arena& A, TensorInfo lhs, TensorInfo rhs, Slice<DimEntry> sum) {
         insert_dim(d.dim(), at::nullopt, i);
     }
 
-    Slice<int64_t> n_lhs_sizes;
-    n_lhs_sizes.extend(A, lhs_dims.batch.sizes);
-    n_lhs_sizes.extend(A, lhs_dims.only.sizes);
-    n_lhs_sizes.extend(A, lhs_dims.reduce.sizes);
-    Slice<int64_t> n_lhs_strides;
-    n_lhs_strides.extend(A, lhs_dims.batch.strides);
-    n_lhs_strides.extend(A, lhs_dims.only.strides);
-    n_lhs_strides.extend(A, lhs_dims.reduce.strides);
-
-    Slice<int64_t> n_rhs_sizes;
-    n_rhs_sizes.extend(A, rhs_dims.batch.sizes);
-    n_rhs_sizes.extend(A, rhs_dims.reduce.sizes);
-    n_rhs_sizes.extend(A, rhs_dims.only.sizes);
-    Slice<int64_t> n_rhs_strides;
-    n_rhs_strides.extend(A, rhs_dims.batch.strides);
-    n_rhs_strides.extend(A, rhs_dims.reduce.strides);
-    n_rhs_strides.extend(A, rhs_dims.only.strides);
-
-    Slice<int64_t> o_size;
-    o_size.extend(A, lhs_dims.batch.sizes);
-    o_size.extend(A, lhs_dims.only.sizes);
-    o_size.extend(A, rhs_dims.only.sizes);
-
-    Slice<DimEntry> result_levels;
-    result_levels.extend(A, batch_dims);
-    result_levels.extend(A, lo_dims);
-    result_levels.extend(A, ro_dims);
-
-    if (lhs_dims.reduce.sizes.size() != sum.size()) {
+    if (lr_dims.dims.size() != sum.size()) {
         for (auto & d : sum) {
-            if (result_levels.contains(d)) {
+            if (!lhs.levels.contains(d) && !rhs.levels.contains(d)) {
                 py::raise_error(DimensionBindError(), "summing over non-existant dimension %S", d.dim().ptr());
             }
         }
     }
 
-    // std::cout << "dot " << lhs.levels << ","  << rhs.levels << "->" << result_levels << "\n";
-    auto lhs_ = lhs.tensor->as_strided(as_array_ref(n_lhs_sizes), as_array_ref(n_lhs_strides), lhs.tensor->storage_offset());
-    auto rhs_ = rhs.tensor->as_strided(as_array_ref(n_rhs_sizes), as_array_ref(n_rhs_strides), rhs.tensor->storage_offset());
+    // std::cout << lhs.levels << " " << rhs.levels << " " << sum << "\n";
+    // std::cout << lro_dims.dims << " " << lo_dims.dims << " " << ro_dims.dims << " " << lr_dims.dims << "\n";
 
-    lhs_ = lhs_.reshape({lro_size, lo_size, lr_size});
-    rhs_ = rhs_.reshape({lro_size, lr_size, ro_size});
+    // no batch, just call mm
+    if (lro_dims.dims.size() != 0) {
+        auto lhs_ = dot_prepare(A, {lro_dims, lo_dims, lr_dims}, lhs);
+        auto rhs_ = dot_prepare(A, {lro_dims, lr_dims, ro_dims}, rhs);
+        return dot_finish(A, {lro_dims, lo_dims, ro_dims}, at::bmm(*lhs_, *rhs_));
+    } else {
+        auto lhs_ = dot_prepare(A, {lo_dims, lr_dims}, lhs);
+        auto rhs_ = dot_prepare(A, {lr_dims, ro_dims}, rhs);
+        return dot_finish(A, {lo_dims, ro_dims}, at::mm(*lhs_, *rhs_));
+    }
 
-    auto result = at::bmm(lhs_, rhs_);
-    result = result.reshape(as_array_ref(o_size));
-
-    return Tensor::from_positional(A, std::move(result), result_levels, true);
 }
 
 static PyObject* test_c(PyObject *self,

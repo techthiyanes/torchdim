@@ -268,11 +268,11 @@ class TestMin(TestCase):
 
         with measure('fc'):
             for _ in range(10000):
-                (a * b).sum(k)
+                (A[i, k] * B[k, j]).sum(k).positional(i, j)
 
         with magic_trace('f.fxt'):
             for _ in range(10000):
-                (a * b).sum(k)
+                (A[i, k] * B[k, j]).sum(k).positional(i, j)
 
         with magic_trace('p.fxt'):
             for _ in range(10000):
