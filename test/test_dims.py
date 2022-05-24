@@ -10,7 +10,7 @@ import gc
 import refcycle
 
 
-from dim._C import _test_c, _n_levels_in_use
+from dim._C import _test_c, _n_levels_in_use, _parse_test
 
 from contextlib import contextmanager
 from time import perf_counter
@@ -297,6 +297,15 @@ class TestMin(TestCase):
         i = dims()
         assert list(A[i].expand(2, 4).positional(i).size()) == [3, 2, 4]
 
+    def test_parse(self):
+        self.assertEqual(("x", None, None, None), _parse_test(1, 0, "x"))
+        self.assertEqual(("x", None, "y", None), _parse_test(1, 0, "x", c="y"))
+        self.assertEqual(("x", None, "y", "z"), _parse_test(1, 0, "x", d="z", c="y"))
+
+        self.assertEqual(("x", "4", None, None), _parse_test(2, 0, "x", b="4"))
+        self.assertEqual(("x", "y", "z", "q"), _parse_test(2, 0, "x", "y", "z", "q"))
+        #self.assertEqual(("x", "y", "z", "q"), _parse_test(2, 0, "x", "y", "z", "q", i="r"))
+        # TODO FINISH TESTING AND PUT THE RIGHT ERROR MESSAGES IN
 
 def do_stuff(a):
     i = dims()

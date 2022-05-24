@@ -521,6 +521,8 @@ struct kwnames_view : public handle {
     }
 };
 
+struct vector_args_parser;
+
 struct vector_args {
     vector_args(PyObject *const *a,
                       Py_ssize_t n,
@@ -548,6 +550,62 @@ struct vector_args {
     }
     int64_t size() const {
         return nargs + (has_keywords() ? kwnames.size() : 0);
+    }
+
+    // bind a test function so this can be tested, first two args for required/kwonly, then return what was parsed...
+
+    // provide write kwarg
+    // don't provide a required arg
+    // don't provide an optional arg
+    // provide a kwarg that is the name of already provided positional
+    // provide a kwonly argument positionally
+    // provide keyword arguments in the wrong order
+    // provide only keyword arguments
+    void parse(std::initializer_list<const char*> names, std::initializer_list<py::handle*> values, int required, int kwonly=0) {
+        auto values_it = values.begin();
+        auto names_it = names.begin();
+        if (nargs > (values.size() - kwonly)) {
+            // TOO MANY POSITIONAL ARGUMENTS
+            raise_error(PyExc_ValueError, "BAD PARSE");
+        }
+        for (auto i : irange(nargs)) {
+            *(*values_it++) = args[i];
+            ++names_it;
+        }
+        if (nargs < required && !kwnames.ptr()) {
+            // NOT ENOUGH REQUIRED ARGUMENTS
+            raise_error(PyExc_ValueError, "BAD PARSE");
+        }
+
+        if (!kwnames.ptr()) {
+            if (nargs < required) {
+                // NOT ENOUGH REQUIRED ARGUMENTS
+                raise_error(PyExc_ValueError, "BAD PARSE");
+            }
+        } else {
+            int consumed = 0;
+            for (auto i : irange(nargs, values.size())) {
+                bool success = i >= required;
+                const char* target_name = *(names_it++);
+                for (auto j : kwnames.enumerate()) {
+                    if (!strcmp(target_name,kwnames[j])) {
+                        *(*values_it) = args[nargs + j];
+                        ++consumed;
+                        success = true;
+                        break;
+                    }
+                }
+                ++values_it;
+                if (!success) {
+                    // REQUIRED ARGUMENT NOT SPECIFIED
+                    raise_error(PyExc_ValueError, "BAD PARSE");
+                }
+            }
+            if (consumed != kwnames.size()) {
+                // NOT ALL KWNAMES ARGUMENTS WERE USED
+                raise_error(PyExc_ValueError, "BAD PARSE");
+            }
+        }
     }
 };
 

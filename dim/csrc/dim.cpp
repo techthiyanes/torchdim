@@ -1431,12 +1431,11 @@ static PyObject* dims(PyObject *self,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
     PY_BEGIN
-    int lists = 0;
-    static const char * const _keywords[] = {"lists", nullptr};
-    static _PyArg_Parser parser = {"|i", _keywords, 0};
-    if (!_PyArg_ParseStackAndKeywords(args, nargs, kwnames, &parser, &lists)) {
-        return nullptr;
-    }
+    py::vector_args va(args, nargs, kwnames);
+    py::handle py_lists;
+    va.parse({"lists"}, {&py_lists}, 0);
+    int lists = py_lists.ptr() ? py::to_int(py_lists) : 0;
+
     PyThreadState* state = PyThreadState_GET();
     PyFrameObject* f = state->frame;
     auto code = (_Py_CODEUNIT*)PyBytes_AS_STRING(f->f_code->co_code);
@@ -2468,20 +2467,18 @@ static PyObject* Tensor_sum(PyObject * self_,
     Arena A;
     PY_BEGIN
     maybeInitializeGlobals();
+    py::vector_args va(args, nargs, kwnames);
     auto self_ = Tensor::unchecked_wrap(args[0]);
     auto d = self_->delayed();
     if (!d) {
-        return _Tensor_sum.call_vector((py::handle*)args, nargs, kwnames).release();
+        return _Tensor_sum.call_vector(va).release();
     }
-
-    #define ARGS(_) _(py::handle, self) _(py::handle, dim) _(py::handle, keepdim) \
-                    _(py::handle, dtype)
-    MPY_PARSE_ARGS_KWNAMES("O|OO$O", ARGS)
-    #undef ARGS
+    py::handle self, dim, keepdim, dtype;
+    va.parse({"self", "dim", "keepdim", "dtype"}, {&self, &dim, &keepdim, &dtype}, 1, 1);
 
     if (dtype.ptr() || (keepdim.ptr() && py::to_bool(keepdim))) {
         std::cout << "SKIPPING fusion because dtype or keepdim=True specified\n";
-        return _Tensor_sum.call_vector((py::handle*)args, nargs, kwnames).release();
+        return _Tensor_sum.call_vector(va).release();
     }
     auto levels = self_->levels();
 
@@ -2489,6 +2486,30 @@ static PyObject* Tensor_sum(PyObject * self_,
     auto reduced_dims = _dims(A, dim, N, false);
 
     return dot(A, TensorInfo::create(A, d->args[0], false), TensorInfo::create(A, d->args[1], false), reduced_dims).release();
+    PY_END(nullptr)
+}
+
+static PyObject* _parse_test(PyObject * self_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+
+    int required = py::to_int(args[0]);
+    int kwonly = py::to_int(args[1]);
+
+    py::vector_args va(args + 2, nargs - 2, kwnames);
+
+
+    py::handle a, b, c, d;
+    va.parse({"a", "b", "c", "d"}, {&a, &b, &c, &d}, required, kwonly);
+    py::tuple r(4);
+    r.set(0, py::object::borrow(a.ptr() ? a : Py_None));
+    r.set(1, py::object::borrow(b.ptr() ? b : Py_None));
+    r.set(2, py::object::borrow(c.ptr() ? c : Py_None));
+    r.set(3, py::object::borrow(d.ptr() ? d : Py_None));
+    return r.release();
+
     PY_END(nullptr)
 }
 
@@ -2506,7 +2527,7 @@ static PyMethodDef methods[] = {
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
     {"_wrap", (PyCFunction) _wrap, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
-    {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
+    {"_parse_test", (PyCFunction) _parse_test, METH_FASTCALL | METH_KEYWORDS},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
