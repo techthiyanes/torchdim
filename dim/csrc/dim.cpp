@@ -1433,7 +1433,7 @@ static PyObject* dims(PyObject *self,
     PY_BEGIN
     py::vector_args va(args, nargs, kwnames);
     py::handle py_lists;
-    va.parse({"lists"}, {&py_lists}, 0);
+    va.parse("dims", {"lists"}, {&py_lists}, 0);
     int lists = py_lists.ptr() ? py::to_int(py_lists) : 0;
 
     PyThreadState* state = PyThreadState_GET();
@@ -2474,7 +2474,7 @@ static PyObject* Tensor_sum(PyObject * self_,
         return _Tensor_sum.call_vector(va).release();
     }
     py::handle self, dim, keepdim, dtype;
-    va.parse({"self", "dim", "keepdim", "dtype"}, {&self, &dim, &keepdim, &dtype}, 1, 1);
+    va.parse("sum", {"self", "dim", "keepdim", "dtype"}, {&self, &dim, &keepdim, &dtype}, 1, 1);
 
     if (dtype.ptr() || (keepdim.ptr() && py::to_bool(keepdim))) {
         std::cout << "SKIPPING fusion because dtype or keepdim=True specified\n";
@@ -2494,6 +2494,7 @@ static PyObject* _parse_test(PyObject * self_,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
     PY_BEGIN
+    maybeInitializeGlobals();
 
     int required = py::to_int(args[0]);
     int kwonly = py::to_int(args[1]);
@@ -2502,7 +2503,7 @@ static PyObject* _parse_test(PyObject * self_,
 
 
     py::handle a, b, c, d;
-    va.parse({"a", "b", "c", "d"}, {&a, &b, &c, &d}, required, kwonly);
+    va.parse("_parse_test", {"a", "b", "c", "d"}, {&a, &b, &c, &d}, required, kwonly);
     py::tuple r(4);
     r.set(0, py::object::borrow(a.ptr() ? a : Py_None));
     r.set(1, py::object::borrow(b.ptr() ? b : Py_None));

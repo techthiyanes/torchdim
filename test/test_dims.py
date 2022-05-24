@@ -304,7 +304,16 @@ class TestMin(TestCase):
 
         self.assertEqual(("x", "4", None, None), _parse_test(2, 0, "x", b="4"))
         self.assertEqual(("x", "y", "z", "q"), _parse_test(2, 0, "x", "y", "z", "q"))
-        #self.assertEqual(("x", "y", "z", "q"), _parse_test(2, 0, "x", "y", "z", "q", i="r"))
+        with self.assertRaises(TypeError):
+            _parse_test(2, 0, "x", "y", "z", "q", "5")
+        with self.assertRaises(TypeError):
+            _parse_test(2, 0, "x","y", b="y")
+
+        with self.assertRaises(TypeError):
+            _parse_test(2, 0, "x",c="y")
+        with self.assertRaises(TypeError):
+            _parse_test(2, 0, "x")
+
         # TODO FINISH TESTING AND PUT THE RIGHT ERROR MESSAGES IN
 
 def do_stuff(a):

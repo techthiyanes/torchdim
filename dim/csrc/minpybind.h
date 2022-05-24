@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <utility>
 #include <iostream>
+#include <memory>
 
 #define PY_BEGIN try {
 #define PY_END(v) } catch(py::exception_set & err) { return (v); }
@@ -54,6 +55,7 @@ struct handle {
         return ptr_;
     }
     object attr(const char* key);
+    bool hasattr(const char* key);
     handle type() const {
         return (PyObject*) Py_TYPE(ptr());
     }
@@ -266,6 +268,10 @@ struct base {
 
 inline object handle::attr(const char* key) {
     return object::checked_steal(PyObject_GetAttrString(ptr(), key));
+}
+
+inline bool handle::hasattr(const char* key) {
+    return PyObject_HasAttrString(ptr(), key);
 }
 
 inline object import(const char* module) {
@@ -521,7 +527,16 @@ struct kwnames_view : public handle {
     }
 };
 
+inline py::object funcname(py::handle func) {
+    if (func.hasattr("__name__")) {
+        return func.attr("__name__");
+    } else {
+        return py::str(func);
+    }
+}
+
 struct vector_args_parser;
+
 
 struct vector_args {
     vector_args(PyObject *const *a,
@@ -561,26 +576,38 @@ struct vector_args {
     // provide a kwonly argument positionally
     // provide keyword arguments in the wrong order
     // provide only keyword arguments
-    void parse(std::initializer_list<const char*> names, std::initializer_list<py::handle*> values, int required, int kwonly=0) {
+    void parse(const char * fname_cstr, std::initializer_list<const char*> names, std::initializer_list<py::handle*> values, int required, int kwonly=0) {
+        auto error = [&]() {
+            // rather than try to match the slower infrastructure with error messages exactly, once we have detected an error, just use that
+            // infrastructure to format it and throw it
+
+            // have to leak this, because python expects these to last
+            const char** names_buf = new const char*[names.size() + 1];
+            std::copy(names.begin(), names.end(), &names_buf[0]);
+            names_buf[names.size()] = nullptr;
+            _PyArg_Parser* _parser = new _PyArg_Parser{NULL, &names_buf[0], fname_cstr, 0};
+            std::unique_ptr<PyObject*[]> buf(new PyObject*[names.size()]);
+            _PyArg_UnpackKeywords((PyObject*const*)args, nargs, NULL, kwnames.ptr(), _parser, required, values.size() - kwonly, 0, &buf[0]);
+            throw exception_set();
+        };
+
         auto values_it = values.begin();
         auto names_it = names.begin();
-        if (nargs > (values.size() - kwonly)) {
-            // TOO MANY POSITIONAL ARGUMENTS
-            raise_error(PyExc_ValueError, "BAD PARSE");
+        auto npositional = values.size() - kwonly;
+
+        if (nargs > npositional) {
+            // TOO MANY ARGUMENTS
+            error();
         }
         for (auto i : irange(nargs)) {
             *(*values_it++) = args[i];
             ++names_it;
         }
-        if (nargs < required && !kwnames.ptr()) {
-            // NOT ENOUGH REQUIRED ARGUMENTS
-            raise_error(PyExc_ValueError, "BAD PARSE");
-        }
 
         if (!kwnames.ptr()) {
             if (nargs < required) {
-                // NOT ENOUGH REQUIRED ARGUMENTS
-                raise_error(PyExc_ValueError, "BAD PARSE");
+                // not enough positional arguments
+                error();
             }
         } else {
             int consumed = 0;
@@ -598,12 +625,12 @@ struct vector_args {
                 ++values_it;
                 if (!success) {
                     // REQUIRED ARGUMENT NOT SPECIFIED
-                    raise_error(PyExc_ValueError, "BAD PARSE");
+                    error();
                 }
             }
             if (consumed != kwnames.size()) {
                 // NOT ALL KWNAMES ARGUMENTS WERE USED
-                raise_error(PyExc_ValueError, "BAD PARSE");
+                error();
             }
         }
     }
