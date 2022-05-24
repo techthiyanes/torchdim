@@ -535,9 +535,6 @@ inline py::object funcname(py::handle func) {
     }
 }
 
-struct vector_args_parser;
-
-
 struct vector_args {
     vector_args(PyObject *const *a,
                       Py_ssize_t n,
@@ -550,6 +547,13 @@ struct vector_args {
     py::handle* args;
     Py_ssize_t nargs;
     kwnames_view kwnames;
+
+    py::handle* begin() {
+        return args;
+    }
+    py::handle* end() {
+        return args + size();
+    }
 
     py::handle operator[](int64_t i) const {
         return args[i];
@@ -633,6 +637,19 @@ struct vector_args {
                 error();
             }
         }
+    }
+    int index(const char* name, int pos) {
+        if (pos < nargs) {
+            return pos;
+        }
+        if (kwnames.ptr()) {
+            for (auto j : kwnames.enumerate()) {
+                if (!strcmp(name, kwnames[j])) {
+                    return nargs + j;
+                }
+            }
+        }
+        return -1;
     }
 };
 

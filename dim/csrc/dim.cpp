@@ -2253,8 +2253,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
     py::object orig;
     int64_t dim_offset = 0;
     int64_t keepdim_offset = 1;
-    py::object dim_name;
-    py::object keepdim_name;
+    std::string dim_name;
     bool single_dim = false;
     bool reduce = true;
     static PyTypeObject Type;
@@ -2264,42 +2263,25 @@ struct WrappedOperator : public py::base<WrappedOperator> {
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
         // std::cout << "_wrapped " << orig << "\n";
-        py::tuple_view tv(kwnames);
-        auto _getarg = [&](py::handle name, int64_t offset_) -> py::handle {
+        py::vector_args va(args, nargs, kwnames);
+
+        auto _getarg = [&](const char* name, int64_t offset_) -> py::handle {
             auto offset = offset_ + 1; // do not include self
-            if (nargs > offset) {
-                return args[offset];
-            }
-            if (kwnames) {
-                for (auto i : tv.enumerate()) {
-                    if (PyObject_RichCompareBool(tv[i].ptr(), name.ptr(), Py_EQ)) {
-                        return args[nargs + i];
-                    }
-                }
-            }
-            return py::handle();
+            auto idx = va.index(name, offset);
+            return idx == -1 ? py::handle() : va[idx];
         };
         Slice<py::handle> patched_args;
-        auto nkwnames = kwnames ? tv.size() : 0;
-        patched_args.extend(A, (py::handle*) args, (py::handle*) args + nargs + nkwnames);
-        auto _patcharg = [&](py::handle name, int64_t offset_, py::handle value) {
+        patched_args.extend(A, va.begin(), va.end());
+        auto _patcharg = [&](const char* name, int64_t offset_, py::handle value) {
             auto offset = offset_ + 1; // do not include self
-            if (nargs > offset) {
-                patched_args[offset] = value.ptr();
-                return;
+            auto idx = va.index(name, offset);
+            if (idx == -1) {
+                py::raise_error(PyExc_ValueError, "Missing argument %s", name);
             }
-            if (kwnames) {
-                for (auto i : tv.enumerate()) {
-                    if (PyObject_RichCompareBool(tv[i].ptr(), name.ptr(), Py_EQ)) {
-                        patched_args[nargs + i] = value;
-                        return;
-                    }
-                }
-            }
-            py::raise_error(PyExc_ValueError, "Missing argument %R", name.ptr());
+            patched_args[idx] = value;
         };
 
-        auto dim = _getarg(dim_name, dim_offset);
+        auto dim = _getarg(dim_name.c_str(), dim_offset);
         if (!dim.ptr()) {
             auto info = TensorInfo::create(A, args[0], true);
             EnableAllLayers l(info.levels);
@@ -2311,7 +2293,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
         auto info = TensorInfo::create(A, args[0]);
         auto keepdim = false;
         if (reduce) {
-            auto py_keepdim = _getarg(keepdim_name,keepdim_offset);
+            auto py_keepdim = _getarg("keepdim",keepdim_offset);
             if (py_keepdim.ptr()) {
                 keepdim = py::to_bool(py_keepdim);
             }
@@ -2352,7 +2334,7 @@ struct WrappedOperator : public py::base<WrappedOperator> {
             }
             py_indices = std::move(tup);
         }
-        _patcharg(dim_name, dim_offset, py_indices);
+        _patcharg(dim_name.c_str(), dim_offset, py_indices);
         patched_args[0] = handle_from_tensor(A, info.tensor);
         auto r = orig.call_vector(patched_args.begin(), nargs, kwnames);
         auto wrap = [&](py::handle h) {
@@ -2442,11 +2424,11 @@ static PyObject* _wrap(PyObject * self_,
         info->keepdim_offset = py::to_int(keepdim_offset);
     }
     if (dim_name.ptr()) {
-        info->dim_name = py::object::borrow(dim_name);
+        info->dim_name = PyUnicode_AsUTF8(dim_name.ptr());
     } else {
-        info->dim_name = py::unicode_from_string("dim");
+        info->dim_name = "dim";
     }
-    info->keepdim_name = py::unicode_from_string("keepdim");
+
     if (single_dim.ptr()) {
         info->single_dim = py::to_bool(single_dim);
     }
