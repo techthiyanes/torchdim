@@ -249,31 +249,34 @@ class TestMin(TestCase):
 
     def test_time_mm_fuse(self):
         i, j, k = dims()
-        A = torch.rand(1, 1)
-        B = torch.rand(1, 1)
+        A = torch.rand(3, 4)
+        B = torch.rand(4, 5)
 
 
         for _ in range(10):
-            r0 = A + B
+            r0 = A @ B
+
         for _ in range(10):
-            a = A[i, j]
-            b = B[i, j]
-            r1 = a + b
+            a = A[i, k]
+            b = B[k, j]
+            r1 = (a * b).sum(k)
 
         with measure('pp'):
             for _ in range(10000):
-                A + B
+                A @ B
         # magic_trace_stop_indicator()
 
         with measure('fc'):
             for _ in range(10000):
-                a + b
-        with measure('fcall'):
+                (a * b).sum(k)
+
+        with magic_trace('f.fxt'):
             for _ in range(10000):
-                (A[i, j] + B[i, j]).positional(i, j)
-        with magic_trace():
+                (a * b).sum(k)
+
+        with magic_trace('p.fxt'):
             for _ in range(10000):
-                (A[i, j] + B[i, j]).positional(i, j)
+                A @ B
 
         # magic_trace_stop_indicator()
 
