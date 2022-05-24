@@ -1905,13 +1905,17 @@ void _bind_dims_to_size(Arena & A, int64_t sz, int64_t sd,
     }
 }
 
+inline bool has_dims(py::handle d) {
+    return Dim::check_exact(d) || Tensor::check_exact(d);
+}
+
 static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     maybeInitializeGlobals();
     bool is_tuple = py::tuple_view::check(index);
-    bool self_has_dims = py::isinstance(self, _Tensor);
+    bool self_has_dims = has_dims(self);
 
     // nothing about first class dims here, fallback to getitem
-    if (!self_has_dims && !is_tuple && !py::isinstance(index, _Tensor)) {
+    if (!self_has_dims && !is_tuple && !has_dims(index)) {
         return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
     }
 
