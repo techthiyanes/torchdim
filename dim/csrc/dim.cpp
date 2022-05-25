@@ -1237,6 +1237,7 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
         };
         return tree_map(A, wrap, result);
     } else {
+        std::cout << orig << " calling functorch...\n";
         // std::cout << "rl: " << result_levels << "\n";
         EnableAllLayers guard(result_levels);
         for (auto i : flat_args.enumerate()) {
@@ -2048,9 +2049,13 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         flat_inputs.append(A, h);
         tensor_inputs.append(A, TensorInfo());
     };
+    TensorRef device_holding_tensor;
     auto append_tensor_input = [&](TensorInfo ti) {
         flat_inputs.append(A, py::handle());
         tensor_inputs.append(A, ti);
+        if (ti.has_device && !device_holding_tensor) {
+            device_holding_tensor = ti.tensor;
+        }
     };
 
     Slice<int64_t> nsz;
@@ -2200,7 +2205,11 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
             if (tensor_inputs[i]) {
                 AT_ASSERT(!flat_inputs[i].ptr());
                 // std::cout << "tensor " << i << " " << tensor_inputs[i].levels << "\n";
-                flat_inputs[i] = handle_from_tensor(A, _match_levels(A, tensor_inputs[i].tensor, tensor_inputs[i].levels, index_levels));
+                TensorRef t = tensor_inputs[i].tensor;
+                if (!tensor_inputs[i].has_device && device_holding_tensor) {
+                    t = A.autorelease(t->to(device_holding_tensor->device()));
+                }
+                flat_inputs[i] = handle_from_tensor(A, _match_levels(A, t, tensor_inputs[i].levels, index_levels));
             }
         }
     }

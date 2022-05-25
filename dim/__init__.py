@@ -22,7 +22,7 @@ prod = lambda x: reduce(operator.mul, x, 1)
 
 # pointwise operators can go through a faster pathway
 # use dict to avoid writing C++ bindings for set
-pointwise = {torch.Tensor.__add__: True, torch.Tensor.__mul__: True, torch.Tensor.__div__: True, torch.nn.functional.dropout: True}
+pointwise = {torch.Tensor.__add__: True, torch.Tensor.__mul__: True, torch.Tensor.__div__: True, torch.Tensor.__truediv__: True, torch.nn.functional.dropout: True}
 
 class _Tensor:
     # fast path around slow wrapping/unwrapping logic for simply queries used

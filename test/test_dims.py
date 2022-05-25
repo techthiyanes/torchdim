@@ -1,7 +1,7 @@
 import dim
 from dim import Tensor, Dim, dims, stack, DimensionBindError, cat
 
-from attn_ft import BertSelfAttention as BertSelfAttentionA
+from attn_ft import BertSelfAttention as BertSelfAttentionA, Linear
 from attn_positional import BertSelfAttention as BertSelfAttentionB
 
 from unittest import TestCase, main
@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from time import perf_counter
 from dim.magic_trace import magic_trace
 
+from torch.profiler import tensorboard_trace_handler
+
 @contextmanager
 def measure(what):
     b = perf_counter()
@@ -29,6 +31,27 @@ def triu(A):
    zero = torch.tensor(0, dtype=torch.float) # XXX - torch.where is janky...
    return torch.where(i <= j, a, zero).positional(i, j)
 
+def gpu_time(lmb, name, r=100):
+        b = torch.cuda.Event(enable_timing=True)
+        e = torch.cuda.Event(enable_timing=True)
+        # with magic_trace(name + ".fxt"):
+        for _ in range(r):
+            lmb()
+        b.record()
+        for _ in range(r):
+            lmb()
+        e.record()
+        e.synchronize()
+        elapsed = b.elapsed_time(e)
+        with torch.profiler.profile(schedule=torch.profiler.schedule(
+            wait=0,
+            warmup=1,
+            active=2), on_trace_ready=tensorboard_trace_handler(name), with_stack=True) as profiler:
+            for _ in range(3):
+                lmb()
+                profiler.step()
+        print(name, elapsed / r)
+        return elapsed / r
 
 class TestMin(TestCase):
 
@@ -60,48 +83,52 @@ class TestMin(TestCase):
 
         A.gather([i], [D]).positional(k, d)
 
-    def test_attn(self):
+    def attn(self, batch_size = 1, sequence_length = 4, hidden_size = 6, num_attention_heads = 3, linear=Linear, device=None, time=False):
+        def maybe_to(x):
+           return x if device is None else x.to(device)
 
-        batch_size = 1
-        sequence_length = 4
-        hidden_size = 6
-        num_attention_heads = 3
         attention_probs_dropout_prob = 0.
-        A = BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob)
-        B = BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob)
+        A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, linear=linear))
+        B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob))
 
         A.load_state_dict(B.state_dict())
-        hidden_state = torch.rand(batch_size, sequence_length, hidden_size)
-
+        hidden_state = maybe_to(torch.rand(batch_size, sequence_length, hidden_size))
         b_out = B(hidden_state)
         a_out = A(hidden_state)
         self.assertTrue(torch.allclose(a_out, b_out)) # why does a simple matmul not do the right thing?
 
+        if time:
+            gpu_time(lambda: B(hidden_state), "positional", r=3)
+            gpu_time(lambda: A(hidden_state), "first_class", r=3)
+            return
+
         for approach in ('relative_key', 'relative_key_query'):
-            num_attention_heads = 3
-            hidden_size = 6
-            A = BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, 4)
-            B = BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, 4)
+            A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, 4, linear=linear))
+            B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, 4))
             A.load_state_dict(B.state_dict())
 
-            hidden_state = torch.rand(2, 4, hidden_size)
+            hidden_state = maybe_to(torch.rand(2, 4, hidden_size))
             b_out = B(hidden_state)
             a_out = A(hidden_state)
             self.assertTrue(torch.allclose(a_out, b_out))
 
-        num_attention_heads = 3
-        hidden_size = 6
-        A = BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, 4)
-        B = BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, 4)
+        A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, 4, linear=linear))
+        B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, 4))
         A.load_state_dict(B.state_dict())
 
-        hidden_state = torch.rand(2, 4, hidden_size)
-        past_key_value = (torch.rand(2, num_attention_heads, 4, hidden_size//num_attention_heads),
-                          torch.rand(2, num_attention_heads, 4, hidden_size//num_attention_heads))
+        hidden_state = maybe_to(torch.rand(2, 4, hidden_size))
+        past_key_value = (maybe_to(torch.rand(2, num_attention_heads, 4, hidden_size//num_attention_heads)),
+                          maybe_to(torch.rand(2, num_attention_heads, 4, hidden_size//num_attention_heads)))
 
         b_out = B(hidden_state, past_key_value=past_key_value)
         a_out = A(hidden_state, past_key_value=past_key_value)
         self.assertTrue(torch.allclose(a_out, b_out))
+
+    def test_attn(self):
+        self.attn()
+
+    def test_attn_cuda(self):
+        self.attn(batch_size = 32, hidden_size=128, sequence_length=512, num_attention_heads=4, device='cuda', time=True, linear=torch.nn.Linear)
 
     def test_stack(self):
         i, j, d = dims()
