@@ -1,5 +1,5 @@
 import dim
-from dim import Tensor, Dim, dims, stack, DimensionBindError, cat
+from dim import Tensor, Dim, dims, stack, DimensionBindError, cat, DimList
 
 from attn_ft import BertSelfAttention as BertSelfAttentionA, Linear
 from attn_positional import BertSelfAttention as BertSelfAttentionB
@@ -58,13 +58,30 @@ class TestMin(TestCase):
     def setUp(self):
         gc.disable()
         gc.collect()
+        self.interesting = 0
+        for o in gc.get_objects():
+            if isinstance(o, (torch.Tensor, Dim, Tensor, DimList)):
+                self.interesting += 1
+        if 'cuda' in self._testMethodName:
+            self.mem_allocated = torch.cuda.memory_allocated()
 
     def tearDown(self):
+        interesting = 0
+        for o in gc.get_objects():
+            if isinstance(o, (torch.Tensor, Dim, Tensor, DimList)):
+                interesting += 1
+        extra_memory = 0
+        if 'cuda' in self._testMethodName:
+            extra_memory += torch.cuda.memory_allocated() - self.mem_allocated
+        extra_objects = interesting - self.interesting
+
         nolevels = _n_levels_in_use() == 0
         if not nolevels:
             refcycle.garbage().export_image('garbage.png')
         gc.collect()
         assert nolevels, f"cleanup failed? {_n_levels_in_use()}"
+        assert extra_memory == 0, f'extra cuda memory left allocated: {extra_memory}'
+        assert extra_objects == 0, f'extra torch.Tensor, Dim, or Tensor left allocated: {extra_objects}'
 
     def test_manual_stuff(self):
 
@@ -90,6 +107,7 @@ class TestMin(TestCase):
         attention_probs_dropout_prob = 0.
         A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, linear=linear))
         B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob))
+
 
         A.load_state_dict(B.state_dict())
         hidden_state = maybe_to(torch.rand(batch_size, sequence_length, hidden_size))
@@ -128,7 +146,7 @@ class TestMin(TestCase):
         self.attn()
 
     def test_attn_cuda(self):
-        self.attn(batch_size = 32, hidden_size=128, sequence_length=512, num_attention_heads=4, device='cuda', time=True, linear=torch.nn.Linear)
+        self.attn(batch_size = 32, hidden_size=128, sequence_length=512, num_attention_heads=4, device='cuda', time=False, linear=torch.nn.Linear)
 
     def test_stack(self):
         i, j, d = dims()

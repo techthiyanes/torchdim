@@ -839,7 +839,6 @@ static PyObject* py_Tensor_from_batched(PyObject *self,
     PY_END(nullptr)
 }
 
-
 py::object Tensor::from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
     size_t seen_dims = 0;
     int last = 0;
@@ -854,7 +853,7 @@ py::object Tensor::from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry>
     }
     AT_ASSERT(last == 0 || last == -1);
     if (!seen_dims) {
-        return py::object::borrow(THPVariable_Wrap(std::move(tensor)));
+        return py::object::steal(THPVariable_Wrap(std::move(tensor)));
     }
 
     py::obj<Tensor> self = Tensor::create();
@@ -1706,7 +1705,9 @@ static PyObject* positional(PyObject *_,
     PY_BEGIN
     AT_ASSERT(nargs-- > 0);
     auto self = Tensor::unchecked_wrap(args++[0]);
+
     at::Tensor& data = self->tensor(A);
+
     auto levels = Slice<DimEntry>();
     levels.extend(A, self->levels());
 
@@ -1716,7 +1717,7 @@ static PyObject* positional(PyObject *_,
     auto append = [&](py::hdl<Dim> d) {
         auto midx = levels.index(d);
         if (!midx) {
-            py::raise_error(DimensionBindError(), "tensor of dimensions %R does not contain dim %R", levels_to_tuple(levels).ptr(), d.ptr());
+            py::raise_error(DimensionBindError(), "tensor of dimensions %R does not contain dim %R", levels_to_tuple(self->levels()).ptr(), d.ptr());
         }
         levels[*midx] = DimEntry();
         flat_positional_dims.append(A, d);
@@ -1770,6 +1771,7 @@ static PyObject* positional(PyObject *_,
         insert_point = new_levels.size();
         new_levels.extend(A, flat_positional_dims);
     }
+
     auto ndata = _match_levels(A, data, self->levels(), new_levels);
     if (to_flatten.size()) {
         Slice<DimEntry> flat_new_levels;
