@@ -43,13 +43,13 @@ def gpu_time(lmb, name, r=100):
         e.record()
         e.synchronize()
         elapsed = b.elapsed_time(e)
-        with torch.profiler.profile(schedule=torch.profiler.schedule(
-            wait=0,
-            warmup=1,
-            active=2), on_trace_ready=tensorboard_trace_handler(name), with_stack=True) as profiler:
-            for _ in range(3):
-                lmb()
-                profiler.step()
+        # with torch.profiler.profile(schedule=torch.profiler.schedule(
+        #     wait=0,
+        #     warmup=1,
+        #     active=2), on_trace_ready=tensorboard_trace_handler(name), with_stack=True) as profiler:
+        #     for _ in range(3):
+        #         lmb()
+        #         profiler.step()
         print(name, elapsed / r)
         return elapsed / r
 
@@ -58,22 +58,22 @@ class TestMin(TestCase):
     def setUp(self):
         gc.disable()
         gc.collect()
-        self.interesting = 0
+        self.interesting = set()
         for o in gc.get_objects():
             if isinstance(o, (torch.Tensor, Dim, Tensor, DimList)):
-                self.interesting += 1
+                self.interesting.add(id(o))
         if 'cuda' in self._testMethodName:
             self.mem_allocated = torch.cuda.memory_allocated()
 
     def tearDown(self):
-        interesting = 0
+        interesting = []
         for o in gc.get_objects():
-            if isinstance(o, (torch.Tensor, Dim, Tensor, DimList)):
-                interesting += 1
+            if isinstance(o, (torch.Tensor, Dim, Tensor, DimList)) and id(o) not in self.interesting:
+                interesting.append(o)
+
         extra_memory = 0
         if 'cuda' in self._testMethodName:
             extra_memory += torch.cuda.memory_allocated() - self.mem_allocated
-        extra_objects = interesting - self.interesting
 
         nolevels = _n_levels_in_use() == 0
         if not nolevels:
@@ -81,7 +81,7 @@ class TestMin(TestCase):
         gc.collect()
         assert nolevels, f"cleanup failed? {_n_levels_in_use()}"
         assert extra_memory == 0, f'extra cuda memory left allocated: {extra_memory}'
-        assert extra_objects == 0, f'extra torch.Tensor, Dim, or Tensor left allocated: {extra_objects}'
+        assert len(interesting) == 0, f'extra torch.Tensor, Dim, or Tensor left allocated: {interesting}'
 
     def test_manual_stuff(self):
 
@@ -118,35 +118,44 @@ class TestMin(TestCase):
         if time:
             gpu_time(lambda: B(hidden_state), "positional", r=3)
             gpu_time(lambda: A(hidden_state), "first_class", r=3)
-            return
 
         for approach in ('relative_key', 'relative_key_query'):
-            A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, 4, linear=linear))
-            B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, 4))
+            A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, sequence_length, linear=linear))
+            B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, approach, sequence_length))
             A.load_state_dict(B.state_dict())
 
-            hidden_state = maybe_to(torch.rand(2, 4, hidden_size))
+            hidden_state = maybe_to(torch.rand(batch_size, sequence_length, hidden_size))
             b_out = B(hidden_state)
             a_out = A(hidden_state)
             self.assertTrue(torch.allclose(a_out, b_out))
 
-        A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, 4, linear=linear))
-        B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, 4))
+            if time:
+                gpu_time(lambda: B(hidden_state), "positional", r=3)
+                gpu_time(lambda: A(hidden_state), "first_class", r=3)
+
+        A = maybe_to(BertSelfAttentionA(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, None, linear=linear))
+        B = maybe_to(BertSelfAttentionB(hidden_size, num_attention_heads, attention_probs_dropout_prob, None, None))
         A.load_state_dict(B.state_dict())
 
-        hidden_state = maybe_to(torch.rand(2, 4, hidden_size))
-        past_key_value = (maybe_to(torch.rand(2, num_attention_heads, 4, hidden_size//num_attention_heads)),
-                          maybe_to(torch.rand(2, num_attention_heads, 4, hidden_size//num_attention_heads)))
+        hidden_state = maybe_to(torch.rand(batch_size, sequence_length, hidden_size))
+        past_key_value = (maybe_to(torch.rand(batch_size, num_attention_heads, sequence_length, hidden_size//num_attention_heads)),
+                          maybe_to(torch.rand(batch_size, num_attention_heads, sequence_length, hidden_size//num_attention_heads)))
 
         b_out = B(hidden_state, past_key_value=past_key_value)
         a_out = A(hidden_state, past_key_value=past_key_value)
         self.assertTrue(torch.allclose(a_out, b_out))
 
+        if time:
+            gpu_time(lambda: B(hidden_state), "positional", r=3)
+            gpu_time(lambda: A(hidden_state), "first_class", r=3)
+
+
     def test_attn(self):
         self.attn()
 
     def test_attn_cuda(self):
-        self.attn(batch_size = 32, hidden_size=128, sequence_length=512, num_attention_heads=4, device='cuda', time=False, linear=torch.nn.Linear)
+        # size from the BERT paper, 90% pretraining of sequence length 128
+        self.attn(batch_size = 256, hidden_size=768, sequence_length=128, num_attention_heads=12, device='cuda', time=True, linear=torch.nn.Linear)
 
     def test_stack(self):
         i, j, d = dims()
