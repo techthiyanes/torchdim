@@ -153,6 +153,15 @@ class TestMin(TestCase):
     def test_attn(self):
         self.attn()
 
+    # def test_inplace(self):
+    #     # i, j = dims()
+    #     # A = torch.rand(3, 4)
+    #     # C = torch.rand(3)
+    #     a = torch.rand(3, 4)
+    #     with magic_trace('inplace'):
+    #         for i in range(100):
+    #             a[ torch.LongTensor([0, 2])] += 7
+
     def test_attn_cuda(self):
         # size from the BERT paper, 90% pretraining of sequence length 128
         self.attn(batch_size = 256, hidden_size=768, sequence_length=128, num_attention_heads=12, device='cuda', time=True, linear=torch.nn.Linear)

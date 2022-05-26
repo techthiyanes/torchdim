@@ -1905,14 +1905,22 @@ inline bool has_dims(py::handle d) {
     return Dim::check_exact(d) || Tensor::check_exact(d);
 }
 
-static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
-    maybeInitializeGlobals();
+struct IndexingInfo {
+    bool can_call_original; // if true, then it is safe to just call getitem or setitem, these objects do not need special handling
+    bool advanced_indexing; // requires actual lookup
+    TensorRef self;
+    Slice<py::handle> flat_inputs;
+    Slice<DimEntry> result_levels;
+    bool has_device;
+};
+
+static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index) {
     bool is_tuple = py::tuple_view::check(index);
     bool self_has_dims = has_dims(self);
 
     // nothing about first class dims here, fallback to getitem
     if (!self_has_dims && !is_tuple && !has_dims(index)) {
-        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+        return { true };
     }
 
     // regularize single index vs tuple of indices
@@ -1977,7 +1985,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
 
     // at this point if we haven't seen any Dim objects, we also can fallback to the original getitem.
     if (can_call_original_getitem) {
-        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+        return {true};
     }
 
     // std::cout << "__getitem__ " << self << " " << index << "\n";
@@ -2225,19 +2233,29 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
         }
     }
 
+    return IndexingInfo {false, requires_getindex, self_info.tensor, flat_inputs, result_levels, self_info.has_device};
+}
+
+static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
+    maybeInitializeGlobals();
+    auto iinfo = getsetitem(A, self, index);
+    if (iinfo.can_call_original) {
+        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+    }
+
     at::Tensor rtensor;
-    if (requires_getindex) {
-        auto self_hdl = handle_from_tensor(A, self_info.tensor);
-        auto tup = slice_to_tuple(flat_inputs);
+    if (iinfo.advanced_indexing) {
+        auto self_hdl = handle_from_tensor(A, iinfo.self);
+        auto tup = slice_to_tuple(iinfo.flat_inputs);
         // std::cout << "calling original getindex " << self_hdl << " " << tup << "\n";
         auto pytensor = py::object::checked_steal(THPVariable_getitem(self_hdl.ptr(), tup.ptr()));
         rtensor = THPVariable_Unpack(pytensor.ptr());
     } else {
         // std::cout << "skipping original getindex\n";
-        rtensor = *self_info.tensor;
+        rtensor = *iinfo.self;
     }
     // std::cout << "returning (from_positional)\n";
-    return Tensor::from_positional(A, std::move(rtensor), result_levels, self_info.has_device);
+    return Tensor::from_positional(A, std::move(rtensor), iinfo.result_levels, iinfo.has_device);
 }
 
 static PyObject* py___getitem__(PyObject *_,
