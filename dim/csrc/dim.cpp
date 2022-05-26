@@ -1241,7 +1241,7 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
         };
         return tree_map(A, wrap, result);
     } else {
-        // std::cout << orig << " calling functorch...\n";
+        std::cout << orig << " calling functorch...\n";
         // std::cout << "rl: " << result_levels << "\n";
         EnableAllLayers guard(result_levels);
         for (auto i : flat_args.enumerate()) {

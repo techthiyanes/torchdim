@@ -154,13 +154,14 @@ class TestMin(TestCase):
         self.attn()
 
     def test_inplace(self):
-        i, n, f = dims()
         # some embeddings table
         embeddings = torch.zeros(10, 3)
 
         # some sparse updates to the embeddings
         indices = torch.arange(2) + 1
         values = torch.rand(2, 3)
+
+        i, n, f = dims()
 
         embeddings[indices[i], f] += values[i, f]
 
@@ -294,9 +295,10 @@ class TestMin(TestCase):
         assert torch.allclose(D.transpose(0, 1).flatten(1,2), D[i, k, j].positional((i, j)).positional(k))
 
 
-
-        print(torch.rand_like(A[i, k]))
-        print(torch.nn.functional.dropout(A[i, k]))
+        r = torch.rand_like(A[i, k]).dims
+        assert i in r and k in r
+        r = torch.nn.functional.dropout(A[i, k]).dims
+        assert i in r and k in r
 
     def test_simple(self):
         i, j, k = dims()

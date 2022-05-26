@@ -18,15 +18,12 @@ class DimensionBindError(Exception):
 
 from functools import reduce
 import operator
+from . import op_properties
+
 prod = lambda x: reduce(operator.mul, x, 1)
 
-# pointwise operators can go through a faster pathway
-pointwise_tup = (torch.Tensor.__add__, torch.Tensor.__radd__,
-                 torch.Tensor.__sub__, torch.Tensor.__rsub__,
-                 torch.Tensor.__mul__, torch.Tensor.__div__, torch.Tensor.__truediv__,
-                 torch.nn.functional.dropout)
 # use dict to avoid writing C++ bindings for set
-pointwise = {t: True for t in pointwise_tup}
+pointwise = {t: True for t in op_properties.pointwise}
 
 class _Tensor:
     # fast path around slow wrapping/unwrapping logic for simply queries used
