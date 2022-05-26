@@ -530,6 +530,7 @@ def _bind(self, offset, dims):
 no_slice = slice(None)
 if True:
     __getitem__ = _C._instancemethod(_C.__getitem__)
+    __setitem__ = _C._instancemethod(_C.__setitem__)
 else:
     def __getitem__(self, input):
         # * bail to original example if we have a single non-Dim tensor, or a non-tensor
@@ -696,6 +697,8 @@ else:
 
 torch.Tensor.__getitem__ = __getitem__
 _Tensor.__getitem__ = __getitem__
+torch.Tensor.__setitem__ = __setitem__
+_Tensor.__setitem__ = __setitem__
 
 _orig_split = torch.Tensor.split
 def split(self, split_size_or_sections, dim=0):

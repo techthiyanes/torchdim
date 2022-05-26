@@ -38,8 +38,10 @@ py::handle NamedTuple;
 py::dict_view pointwise;
 py::handle torch_Tensor_expand;
 binaryfunc THPVariable_getitem;
+objobjargproc THPVariable_setitem;
 py::handle no_slice;
 PyTypeObject* torch_Tensor;
+py::handle torch_Tensor_copy_;
 
 static void maybeInitializeGlobals() {
     if (empty_dict.ptr()) {
@@ -55,8 +57,11 @@ static void maybeInitializeGlobals() {
     NamedTuple = py::import("typing").attr("NamedTuple");
     pointwise = dim.attr("pointwise");
     torch_Tensor_expand = torch.attr("Tensor").attr("expand");
+    torch_Tensor_copy_ = torch.attr("Tensor").attr("copy_");
     auto TensorBase = (PyTypeObject*) torch.attr("_C").attr("_TensorBase").ptr();
     THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
+    THPVariable_setitem = TensorBase->tp_as_mapping->mp_ass_subscript;
+
     no_slice = PySlice_New(NULL, NULL, NULL);
     _Tensor_sum = _Tensor.attr("sum");
 }
@@ -1914,12 +1919,13 @@ struct IndexingInfo {
     bool has_device;
 };
 
-static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index) {
+static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, bool tensors_have_dims) {
     bool is_tuple = py::tuple_view::check(index);
-    bool self_has_dims = has_dims(self);
+
+    bool can_call_original_getitem = !tensors_have_dims;
 
     // nothing about first class dims here, fallback to getitem
-    if (!self_has_dims && !is_tuple && !has_dims(index)) {
+    if (can_call_original_getitem && !is_tuple && !has_dims(index)) {
         return { true };
     }
 
@@ -1935,7 +1941,6 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index) {
         }
     }
 
-    bool can_call_original_getitem = !self_has_dims;
     int64_t dims_indexed = 0;
     int64_t expanding_object = -1;
     DimList* unbound_dim_list = nullptr;
@@ -2238,7 +2243,7 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index) {
 
 static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     maybeInitializeGlobals();
-    auto iinfo = getsetitem(A, self, index);
+    auto iinfo = getsetitem(A, self, index, has_dims(self));
     if (iinfo.can_call_original) {
         return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
     }
@@ -2258,6 +2263,42 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     return Tensor::from_positional(A, std::move(rtensor), iinfo.result_levels, iinfo.has_device);
 }
 
+static void __setitem__(Arena & A, py::handle self, py::handle index, py::handle rhs) {
+    maybeInitializeGlobals();
+    auto iinfo = getsetitem(A, self, index, has_dims(self) || has_dims(rhs));
+    if (iinfo.can_call_original) {
+        if (-1 == THPVariable_setitem(self.ptr(), index.ptr(), rhs.ptr())) {
+            throw py::exception_set();
+        }
+    }
+
+    auto rhs_info = TensorInfo::create(A, rhs, false, false);
+    if (rhs_info) { // otherwise rhs can be a scalar...
+        for (auto l : rhs_info.levels) {
+            if (!iinfo.result_levels.contains(l)) {
+                if (l.is_positional()) {
+                    py::raise_error(DimensionBindError(), "rhs contains too many dimensions (%d) compared to indexed value (%d)", ndim_of_levels(iinfo.result_levels), rhs_info.ndim());
+                } else {
+                    auto tup = levels_to_tuple(iinfo.result_levels);
+                    py::raise_error(DimensionBindError(), "rhs of setitem contains dimension %R which is not in the dimension on the left (%R)", l.dim().ptr(), tup.ptr());
+                }
+            }
+        }
+        auto rhs_matched = _match_levels(A, rhs_info.tensor, rhs_info.levels, iinfo.result_levels);
+        rhs = handle_from_tensor(A, rhs_matched);
+    }
+    self = handle_from_tensor(A, iinfo.self);
+
+    if (iinfo.advanced_indexing) {
+        auto tup = slice_to_tuple(iinfo.flat_inputs);
+        if (-1 == THPVariable_setitem(self.ptr(), tup.ptr(), rhs.ptr())) {
+            throw py::exception_set();
+        }
+    } else {
+        torch_Tensor_copy_.call(self, rhs);
+    }
+}
+
 static PyObject* py___getitem__(PyObject *_,
                       PyObject *const *args,
                       Py_ssize_t nargs,
@@ -2266,6 +2307,18 @@ static PyObject* py___getitem__(PyObject *_,
     PY_BEGIN
     AT_ASSERT(nargs == 2);
     return __getitem__(A, args[0], args[1]).release();
+    PY_END(nullptr)
+}
+
+static PyObject* py___setitem__(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    AT_ASSERT(nargs == 3);
+    __setitem__(A, args[0], args[1], args[2]);
+    Py_RETURN_NONE;
     PY_END(nullptr)
 }
 
@@ -2559,6 +2612,7 @@ static PyMethodDef methods[] = {
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
+    {"__setitem__", (PyCFunction) py___setitem__, METH_FASTCALL | METH_KEYWORDS},
     {"_wrap", (PyCFunction) _wrap, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
     {"_parse_test", (PyCFunction) _parse_test, METH_FASTCALL | METH_KEYWORDS},

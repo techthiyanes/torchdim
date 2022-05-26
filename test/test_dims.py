@@ -153,14 +153,17 @@ class TestMin(TestCase):
     def test_attn(self):
         self.attn()
 
-    # def test_inplace(self):
-    #     # i, j = dims()
-    #     # A = torch.rand(3, 4)
-    #     # C = torch.rand(3)
-    #     a = torch.rand(3, 4)
-    #     with magic_trace('inplace'):
-    #         for i in range(100):
-    #             a[ torch.LongTensor([0, 2])] += 7
+    def test_inplace(self):
+        i, n, f = dims()
+        # some embeddings table
+        embeddings = torch.zeros(10, 3)
+
+        # some sparse updates to the embeddings
+        indices = torch.arange(2) + 1
+        values = torch.rand(2, 3)
+
+        embeddings[indices[i], f] += values[i, f]
+
 
     def test_attn_cuda(self):
         # size from the BERT paper, 90% pretraining of sequence length 128
