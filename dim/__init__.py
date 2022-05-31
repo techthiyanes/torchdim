@@ -735,5 +735,5 @@ def split(self, split_size_or_sections, dim=0):
 
 torch.Tensor.split = split
 _Tensor.split = split
-
+torch.Tensor.expand = _C._instancemethod(_C.expand)
 wrap_type(_Tensor, torch.Tensor, _Tensor.__torch_function__)

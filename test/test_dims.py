@@ -405,7 +405,10 @@ class TestMin(TestCase):
         a, b = dims(3, [4, 5], lists=1)
         assert b[0].size == 4
         assert b[1].size == 5
-
+    def test_diag(self):
+        i = dims()
+        A = torch.rand(4, 4)
+        print(A[i, i])
 def do_stuff(a):
     i = dims()
     i.size = 4

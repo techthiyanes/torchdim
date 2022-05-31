@@ -56,7 +56,7 @@ static void maybeInitializeGlobals() {
     DelayedMulTensor = dim.attr("DelayedMulTensor");
     NamedTuple = py::import("typing").attr("NamedTuple");
     pointwise = dim.attr("pointwise");
-    torch_Tensor_expand = torch.attr("Tensor").attr("expand");
+    torch_Tensor_expand = torch.attr("_C").attr("_TensorBase").attr("expand");
     torch_Tensor_copy_ = torch.attr("Tensor").attr("copy_");
     auto TensorBase = (PyTypeObject*) torch.attr("_C").attr("_TensorBase").ptr();
     THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
@@ -1854,16 +1854,20 @@ static PyObject* expand(PyObject *_,
     Arena A;
     PY_BEGIN
     AT_ASSERT(nargs-- > 0);
-    auto self = Tensor::wrap(args++[0]);
+    auto info = TensorInfo::create(A, args++[0], false);
     for (auto i : irange(nargs)) {
         if (!Dim::check(args[i])) {
             maybeInitializeGlobals();
-            auto newargs = slice_to_tuple(Slice<py::handle>((py::handle*)args - 1, (py::handle*)args + nargs));
-            return __torch_function__(A, torch_Tensor_expand, py::vector_args(args - 1, nargs + 1, kwnames), false).release();
+            py::vector_args vargs(args - 1, nargs + 1, kwnames);
+            if (THPVariable_Check(args[-1])) {
+                return torch_Tensor_expand.call_vector(vargs).release();
+            } else {
+                return __torch_function__(A, torch_Tensor_expand, vargs, false).release();
+            }
         }
     }
-    at::Tensor& data = self->tensor(A);
-    auto levels = self->levels();
+    const at::Tensor& data = *info.tensor;
+    auto levels = info.levels;
     Slice<DimEntry> new_levels;
     Slice<int64_t> sz;
     Slice<int64_t> sd;
@@ -1882,7 +1886,7 @@ static PyObject* expand(PyObject *_,
     sz.extend(A, osz.begin(), osz.end());
     sd.extend(A, osd.begin(), osd.end());
     at::Tensor ndata = data.as_strided(at::IntArrayRef(sz.begin(), sz.end()), at::IntArrayRef(sd.begin(), sd.end()), data.storage_offset());
-    return Tensor::from_positional(A, std::move(ndata), new_levels, self->has_device()).release();
+    return Tensor::from_positional(A, std::move(ndata), new_levels, info.has_device).release();
     PY_END(nullptr)
 }
 
@@ -2217,6 +2221,12 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
                 requires_getindex = true;
                 flat_inputs[i] = py::handle();
                 tensor_inputs[i] = TensorInfo {d->range(), Slice<DimEntry>(A, DimEntry(d)), false, TensorRef()};
+                if (!index_levels.contains(d)) {
+                     index_levels.append(A, d);
+                }
+                if (tensor_insert_point == -1) {
+                    tensor_insert_point = result_levels.size();
+                }
             }
          } else {
             if (inp.ptr() != no_slice.ptr()) {
