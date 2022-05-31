@@ -1438,10 +1438,37 @@ static PyObject* dims(PyObject *self,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
     PY_BEGIN
-    py::vector_args va(args, nargs, kwnames);
-    py::handle py_lists;
-    va.parse("dims", {"lists"}, {&py_lists}, 0);
-    int lists = py_lists.ptr() ? py::to_int(py_lists) : 0;
+    size_t lists = 0;
+    if (kwnames) {
+        py::kwnames_view names(kwnames);
+        if (names.size() != 1 || strcmp("lists", names[0]) != 0) {
+            py::raise_error(PyExc_TypeError, "expect one keywork argument 'lists' but found %d", names.size());
+        }
+        lists = py::to_int(args[nargs]);
+    }
+
+    auto create_dim = [&](py::object name, int i) {
+        auto d = Dim::create(std::move(name));
+        if (i < nargs) {
+            d->set_size(py::to_int(args[i]));
+        }
+        return d;
+    };
+    auto create_dimlist = [&](py::object name, int i) {
+        auto d = DimList::create(std::move(name));
+        if (i < nargs) {
+            if (py::is_int(args[i])) {
+                d->bind_len(py::to_int(args[i]));
+            } else {
+                py::sequence_view s(args[i]);
+                d->bind_len(s.size());
+                for (auto i : irange(d->size())) {
+                    d->dims_[i]->set_size(py::to_int(s[i]));
+                }
+            }
+        }
+        return d;
+    };
 
     PyThreadState* state = PyThreadState_GET();
     PyFrameObject* f = state->frame;
@@ -1450,7 +1477,7 @@ static PyObject* dims(PyObject *self,
     auto unpack = code[first];
     if (relevant_op(unpack)) {
         auto str = getname(f->f_code, unpack);
-        return (lists) ? DimList::create(str).release() : Dim::create(str).release();
+        return (lists) ? create_dimlist(std::move(str), 0).release() : create_dim(std::move(str), 0).release();
     }
     if (_Py_OPCODE(unpack) != UNPACK_SEQUENCE) {
         py::raise_error(PyExc_SyntaxError, "dims() must be assigned to a sequence of variable names");
@@ -1462,17 +1489,15 @@ static PyObject* dims(PyObject *self,
         auto str = getname(f->f_code, code[first + 1 + i]);
         py::object item;
         if (i >= ndims - lists) {
-            item = DimList::create(str);
+            item = create_dimlist(std::move(str), i);
         } else {
-            item = Dim::create(str);
+            item = create_dim(std::move(str), i);
         }
         result.set(i, std::move(item));
     }
     return result.release();
     PY_END(nullptr)
 }
-
-
 
 int64_t dim_index(const std::vector<py::obj<Dim>>& dims, py::hdl<Dim> dim) {
     for (int64_t i = 0, N  = dims.size(); i < N; ++i) {

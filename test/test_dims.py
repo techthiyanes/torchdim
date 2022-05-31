@@ -390,6 +390,21 @@ class TestMin(TestCase):
             _parse_test(2, 0, "x")
 
         # TODO FINISH TESTING AND PUT THE RIGHT ERROR MESSAGES IN
+    def test_dim_args(self):
+        a = dims(lists=1)
+        assert isinstance(a, DimList)
+        a, b = dims(lists=1)
+        assert isinstance(a, Dim)
+        assert isinstance(b, DimList)
+        assert str(a) == 'a'
+        a, b = dims(3, 4)
+        assert a.size == 3
+        assert b.size == 4
+        a, b = dims(3, 4, lists=1)
+        assert len(b) == 4
+        a, b = dims(3, [4, 5], lists=1)
+        assert b[0].size == 4
+        assert b[1].size == 5
 
 def do_stuff(a):
     i = dims()
