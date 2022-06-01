@@ -48,6 +48,8 @@ class _Tensor:
         positional = reference.positional
         expand = reference.expand
 
+    index = _C._instancemethod(_C.index)
+
     def __repr__(self):
         tensor, levels = self._tensor, self._levels
         return f'{tensor}\nwith dims={levels} {tensor.size()}'

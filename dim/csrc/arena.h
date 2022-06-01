@@ -65,6 +65,14 @@ struct Slice {
         return extend(arena, Slice<T>((T*)begin, (T*)end));
     }
 
+    bool remove(Arena& A, T value) {
+        auto idx = index(value);
+        if (idx) {
+            insert(A, slice(*idx, *idx + 1), Slice());
+        }
+        return idx.has_value();
+    }
+
     Slice slice(int begin) {
         return slice(begin, size_);
     }

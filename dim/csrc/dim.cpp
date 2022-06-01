@@ -1945,6 +1945,102 @@ struct IndexingInfo {
     bool has_device;
 };
 
+
+IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> input, Slice<DimEntry> keys, Slice<py::handle> values, bool has_dimpacks_or_none);
+static py::object invoke_getitem(Arena& A, const IndexingInfo& iinfo);
+
+static py::object index(Arena& A, py::handle self, py::handle dims, py::handle indices) {
+    maybeInitializeGlobals();
+    Slice<py::handle> dims_list;
+    Slice<py::handle> indices_list;
+
+    // we allow for matching single dims to multiple dims,
+    // so we first have to normalize everything into the case where there is a list on lhs and the rhs
+    bool lhs_list = py::is_sequence(dims);
+    bool rhs_list = py::is_sequence(indices);
+    if (lhs_list && rhs_list) {
+        py::sequence_view dv(dims);
+        py::sequence_view ind(indices);
+        size_t N = dv.size();
+        if (N != ind.size()) {
+            py::raise_error(PyExc_TypeError, "dims (%d) and indices (%d) must have the same length", int(N), int(ind.size()));
+        }
+        for (auto i : irange(N)) {
+            dims_list.append(A, A.autorelease(dv[i]));
+            indices_list.append(A, A.autorelease(ind[i]));
+        }
+    } else {
+        dims_list.append(A, dims);
+        indices_list.append(A, indices);
+    }
+
+    // dims being indexed can be grouped together into a single index space, and we have to
+    // flatten them int a single dimension before we can index them...
+    auto self_info = TensorInfo::create(A, self, false);
+    Slice<DimEntry> new_levels;
+    Slice<DimEntry> to_flatten;
+    Slice<DimEntry> dims_list_flat;
+    for (auto i : dims_list.enumerate()) {
+        if (py::tuple_view::check(dims_list[i])) {
+            py::tuple_view t(dims_list[i]);
+            if (t.size() == 0) {
+                py::raise_error(PyExc_TypeError, "expected at least one dimension in tuple pack");
+            }
+            auto first = Dim::wrap(t[0]);
+            dims_list_flat.append(A, first);
+            if (t.size() == 1) {
+                continue;
+            }
+            if (to_flatten.size() == 0) {
+                new_levels.extend(A, self_info.levels);
+            }
+            Slice<DimEntry> rest;
+            for (auto i : irange(2, t.size())) {
+                auto d = Dim::wrap(t[i]);
+                if (!new_levels.remove(A, d)) {
+                     py::raise_error(PyExc_TypeError, "dimension %R not in tensor", d->ptr());
+                }
+                rest.append(A, d);
+            }
+
+            auto first_idx = new_levels.index(first);
+            if (!first_idx) {
+                py::raise_error(PyExc_TypeError, "dimension %R not in tensor", first->ptr());
+            }
+            new_levels.insert(A, new_levels.slice(*first_idx + 1, *first_idx + 1), rest);
+            to_flatten.extend(A, rest);
+        } else {
+            dims_list_flat.append(A, Dim::check(dims_list[i]));
+        }
+    }
+    if (to_flatten.size() > 0) {
+        TensorRef rearranged = _match_levels(A, self_info.tensor, self_info.levels, new_levels);
+        at::IntArrayRef sizes = self_info.tensor->sizes();
+        Slice<int64_t> new_sizes;
+        Slice<DimEntry> reshape_levels;
+        for (auto i : new_levels.enumerate()) {
+            if (to_flatten.contains(new_levels[i])) {
+                new_sizes.back() *= sizes[i];
+            } else {
+                new_sizes.append(A, sizes[i]);
+                reshape_levels.append(A, new_levels[i]);
+            }
+        }
+        self_info.tensor = A.autorelease(rearranged->reshape(at::IntArrayRef(new_sizes.begin(), new_sizes.end())));
+        self_info.levels = reshape_levels; // note: we are using the first level in a flattened group to represent the group for the rest of the op
+                                           // we need to be careful not to rely the dimensions size because it doesnt match the size of the whole group
+    }
+    bool has_dimpacks = false;
+    for (auto idx : indices_list) {
+        if (py::tuple_view::check(idx)) {
+            has_dimpacks = true;
+            break;
+        }
+    }
+    IndexingInfo info = getsetitem_flat(A, self_info, Slice<py::handle>(), dims_list_flat, indices_list, has_dimpacks);
+    return invoke_getitem(A, info);
+}
+
 static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, bool tensors_have_dims) {
     bool is_tuple = py::tuple_view::check(index);
 
@@ -2058,11 +2154,13 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
         input.insert(A, input.slice(idx, idx + 1), more_dims);
     }
 
+    return getsetitem_flat(A, self_info, input, Slice<DimEntry>(), Slice<py::handle>(), has_dimpacks_or_none);
+}
 
+IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> input, Slice<DimEntry> keys, Slice<py::handle> values, bool has_dimpacks_or_none) {
     // At this point:
     // ..., DimList have been eliminated
     // Dim, Tensor, Tuple[Dim,...], int, slice still remain
-
 
 
     // we have to count how many times we see a dimension.
@@ -2121,35 +2219,15 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
         }
     };
 
-    // pair up the indexing expressions with dimension of self it indexes
-    // self may have first-class dims, which do not participate the indexing.
-    for (auto i : self_info.levels.enumerate()) {
-        auto l = self_info.levels[i];
-        if (!l.is_positional()) {
-            add_dim(l.dim());
-            append_flat_handle(l.dim());
-            append_size(i);
-            continue;
-        }
-        parse_nones();
 
-        // we might have fewer indices than tensor dimensions,
-        // which implicitly indexes the remaining dimensions with :
-        if (!input_it.size()) {
-            append_flat_handle(no_slice);
-            append_size(i);
-            continue;
-        }
-
-        py::handle arg = input_it[0];
-        input_it = input_it.slice(1);
+    auto append_item = [&](int i, py::handle arg) {
         if (Dim::check_exact(arg)) {
             auto d = Dim::unchecked_wrap(arg);
             d->set_size(sz[i]);
             add_dim(d);
             append_size(i);
             append_flat_handle(arg);
-            continue;
+            return;
         }
         auto info = TensorInfo::create(A, arg, false, false);
         if (info) {
@@ -2160,7 +2238,7 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
                     add_dim(il.dim());
                 }
             }
-            continue;
+            return;
         }
 
         if (py::tuple_view::check(arg)) {
@@ -2174,11 +2252,41 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
                     append_flat_handle(dim_pack.back());
                 }
                 _bind_dims_to_size(A, sz[i], sd[i], dim_pack, nsz, nsd);
-                continue;
+                return;
             }
         }
         append_size(i);
         append_flat_handle(arg);
+    };
+
+    // pair up the indexing expressions with dimension of self it indexes
+    // self may have first-class dims, which do not participate the indexing.
+    for (auto i : self_info.levels.enumerate()) {
+        auto l = self_info.levels[i];
+        if (l.is_positional()) {
+            // grab and index from the positional list
+            parse_nones();
+            // we might have fewer indices than tensor dimensions,
+            // which implicitly indexes the remaining dimensions with :
+            if (!input_it.size()) {
+                append_flat_handle(no_slice);
+                append_size(i);
+            } else {
+                py::handle arg = input_it[0];
+                input_it = input_it.slice(1);
+                append_item(i, arg);
+            }
+        } else {
+            // grab an index from the dimension list
+            auto d = l.dim();
+            if (auto idx = keys.index(d)) {
+                append_item(i, values[*idx]);
+            } else {
+                add_dim(l.dim());
+                append_flat_handle(l.dim());
+                append_size(i);
+            }
+        }
     }
     // any training Nones may have no existing dimension associated with them in self.
     parse_nones();
@@ -2273,13 +2381,7 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
     return IndexingInfo {false, requires_getindex, self_info.tensor, flat_inputs, result_levels, self_info.has_device};
 }
 
-static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
-    maybeInitializeGlobals();
-    auto iinfo = getsetitem(A, self, index, has_dims(self));
-    if (iinfo.can_call_original) {
-        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
-    }
-
+static py::object invoke_getitem(Arena& A, const IndexingInfo& iinfo) {
     at::Tensor rtensor;
     if (iinfo.advanced_indexing) {
         auto self_hdl = handle_from_tensor(A, iinfo.self);
@@ -2293,6 +2395,16 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     }
     // std::cout << "returning (from_positional)\n";
     return Tensor::from_positional(A, std::move(rtensor), iinfo.result_levels, iinfo.has_device);
+}
+
+static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
+    maybeInitializeGlobals();
+    auto iinfo = getsetitem(A, self, index, has_dims(self));
+    if (iinfo.can_call_original) {
+        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+    }
+
+    return invoke_getitem(A, iinfo);
 }
 
 static void __setitem__(Arena & A, py::handle self, py::handle index, py::handle rhs) {
@@ -2351,6 +2463,20 @@ static PyObject* py___setitem__(PyObject *_,
     AT_ASSERT(nargs == 3);
     __setitem__(A, args[0], args[1], args[2]);
     Py_RETURN_NONE;
+    PY_END(nullptr)
+}
+
+
+static PyObject* py_index(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    py::vector_args va(args, nargs, kwnames);
+    py::handle self, dims, indices;
+    va.parse("index", {"self", "dims", "indices"}, {&self, &dims, &indices}, 3);
+    return index(A, self, dims, indices).release();
     PY_END(nullptr)
 }
 
@@ -2642,6 +2768,7 @@ static PyMethodDef methods[] = {
     {"__torch_function__", (PyCFunction) py___torch_function__, METH_FASTCALL | METH_KEYWORDS},
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
+    {"index", (PyCFunction) py_index, METH_FASTCALL | METH_KEYWORDS},
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
     {"__setitem__", (PyCFunction) py___setitem__, METH_FASTCALL | METH_KEYWORDS},
