@@ -8,13 +8,21 @@ from unittest import TestCase, main
 import torch
 import gc
 import refcycle
+from torchvision.models import resnet18
 
 
 from dim._C import _test_c, _n_levels_in_use, _parse_test
 
 from contextlib import contextmanager
 from time import perf_counter
-from dim.magic_trace import magic_trace
+
+measure_perf = False
+if measure_perf:
+    from dim.magic_trace import magic_trace
+else:
+    @contextmanager
+    def magic_trace(*args, **kwargs):
+        yield
 
 from torch.profiler import tensorboard_trace_handler
 
@@ -76,12 +84,12 @@ class TestMin(TestCase):
             extra_memory += torch.cuda.memory_allocated() - self.mem_allocated
 
         nolevels = _n_levels_in_use() == 0
-        if not nolevels:
-            refcycle.garbage().export_image('garbage.png')
+        if not nolevels or extra_memory != 0 or len(interesting) != 0:
+            refcycle.garbage().export_image('garbage.pdf')
         gc.collect()
         assert nolevels, f"cleanup failed? {_n_levels_in_use()}"
         assert extra_memory == 0, f'extra cuda memory left allocated: {extra_memory}'
-        assert len(interesting) == 0, f'extra torch.Tensor, Dim, or Tensor left allocated: {interesting}'
+        assert len(interesting) == 0, f'extra torch.Tensor, Dim, or Tensor left allocated: {len(interesting)} objects of types: { [type(t) for t in interesting] }'
 
     def test_manual_stuff(self):
 
@@ -168,7 +176,7 @@ class TestMin(TestCase):
 
     def test_attn_cuda(self):
         # size from the BERT paper, 90% pretraining of sequence length 128
-        self.attn(batch_size = 256, hidden_size=768, sequence_length=128, num_attention_heads=12, device='cuda', time=True, linear=torch.nn.Linear)
+        self.attn(batch_size = 256, hidden_size=768, sequence_length=128, num_attention_heads=12, device='cuda', time=measure_perf, linear=torch.nn.Linear)
 
     def test_stack(self):
         i, j, d = dims()
@@ -389,7 +397,13 @@ class TestMin(TestCase):
         with self.assertRaises(TypeError):
             _parse_test(2, 0, "x")
 
-        # TODO FINISH TESTING AND PUT THE RIGHT ERROR MESSAGES IN
+    def test_network(self):
+        rn = resnet18(norm_layer=lambda x: torch.nn.BatchNorm2d(x, track_running_stats=False))
+        img = torch.rand(2, 1, 3, 224, 224)
+        i = dims()
+        r = rn(img[i])
+        assert i in r.dims
+
     def test_dim_args(self):
         a = dims(lists=1)
         assert isinstance(a, DimList)

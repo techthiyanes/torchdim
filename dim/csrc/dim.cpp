@@ -33,7 +33,6 @@ py::handle empty_dict;
 py::handle torch_Tensor___mul__;
 py::handle _Tensor;
 py::handle _Tensor_sum;
-py::handle DelayedMulTensor;
 py::handle NamedTuple;
 py::dict_view pointwise;
 py::handle torch_Tensor_expand;
@@ -53,7 +52,6 @@ static void maybeInitializeGlobals() {
     torch_Tensor = (PyTypeObject*) torch.attr("Tensor").ptr();
     torch_Tensor___mul__ = torch.attr("Tensor").attr("__mul__");
     _Tensor = dim.attr("_Tensor");
-    DelayedMulTensor = dim.attr("DelayedMulTensor");
     NamedTuple = py::import("typing").attr("NamedTuple");
     pointwise = dim.attr("pointwise");
     torch_Tensor_expand = torch.attr("_C").attr("_TensorBase").attr("expand");
@@ -1565,7 +1563,6 @@ py::object dot_finish(Arena& A, std::initializer_list<DotPart> parts, at::Tensor
 
 
 py::object dot(Arena& A, TensorInfo lhs, TensorInfo rhs, Slice<DimEntry> sum) {
-
     auto lhs_strides = lhs.tensor->strides();
     auto rhs_strides = rhs.tensor->strides();
 
