@@ -209,8 +209,8 @@ class TestMin(TestCase):
         a = torch.arange(3*12).view(3, 12)
         i, j, k = dims()
         k.size = 4
-        r = a[i, (j, k)]
-        x = r.positional(i, (j, k))
+        r = a[i, [j, k]]
+        x = r.positional(i, [j, k])
         self.assertTrue(torch.allclose(a, x))
 
     def test_hello(self):
@@ -280,7 +280,7 @@ class TestMin(TestCase):
             pass
         c, d = dims()
         c.size = 2
-        assert torch.allclose(A[i, (c,d)].positional(i, c, d), A.view(3, 2, 2))
+        assert torch.allclose(A[i, [c,d]].positional(i, c, d), A.view(3, 2, 2))
 
         assert torch.allclose(A[c + 1, c + 0].positional(c), A[torch.arange(2) + 1, torch.arange(2)])
         try:

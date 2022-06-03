@@ -2042,14 +2042,8 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
 }
 
 Slice<py::handle> maybe_dimpack(py::handle s) {
-        // can we avoid rechecking?
-    if (py::tuple_view::check(s)) {
-        py::tuple_view tv(s);
-        if (tv.size() && Dim::check_exact(tv[0])) {
-            PyObject** begin = &PyTuple_GET_ITEM(s.ptr(),0);
-            return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
-        }
-    } else if (py::list_view::check(s)) {
+    // can we avoid rechecking?
+    if (py::list_view::check(s)) {
         py::list_view tv(s);
         if (tv.size() && Dim::check_exact(tv[0])) {
             PyObject** begin = &PyList_GET_ITEM(s.ptr(),0);
@@ -2417,11 +2411,7 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     maybeInitializeGlobals();
     auto iinfo = getsetitem(A, self, index, has_dims(self));
     if (iinfo.can_call_original) {
-        std::cout << "CALLING ORIGINAL!\n";
-        auto r = THPVariable_getitem(self.ptr(), index.ptr());
-        std::cout << py::handle(PyErr_Occurred()) << "\n";
-        auto rr = py::object::checked_steal(r);
-        return rr;
+        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
     }
 
     return invoke_getitem(A, iinfo);

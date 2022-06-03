@@ -58,9 +58,9 @@ class BertSelfAttention(nn.Module):
         # The group (heads, features) splits apart a single positional dimension
         # into two dimensions. Since heads.size*features.size == q.size(2)
         # and we specified heads.size, features.size is inferred here.
-        q = q[batch, query_sequence, (heads, features)]
-        k = k[batch, key_sequence, (heads, features)]
-        v = v[batch, key_sequence, (heads, features)]
+        q = q[batch, query_sequence, [heads, features]]
+        k = k[batch, key_sequence, [heads, features]]
+        v = v[batch, key_sequence, [heads, features]]
 
 
         # this option allows the model to attend to not just the elements of the current sequence
@@ -128,4 +128,4 @@ class BertSelfAttention(nn.Module):
 
         # finally, we convert back to a standard tensor by describing the layout of dimensions.
         # working in reverse to with_dims, the (heads, features) group flattens the dimensions into a single one.
-        return context_layer.positional(batch, query_sequence, (heads, features))
+        return context_layer.positional(batch, query_sequence, [heads, features])
