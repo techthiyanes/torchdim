@@ -31,13 +31,14 @@ if not use_c:
 class _Tensor:
     # fast path around slow wrapping/unwrapping logic for simply queries used
     # by the implementation...
-    @property
-    def ndim(self):
-        return self._batchtensor.ndim
+
 
     @property
     def dims(self):
         return tuple(d for d in self._levels if isinstance(d, Dim))
+
+    def dim(self):
+        return self.ndim
 
     if use_c:
         __torch_function__ = classmethod(_C.__torch_function__)

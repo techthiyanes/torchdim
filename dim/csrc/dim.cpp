@@ -264,8 +264,8 @@ static PyGetSetDef Dim_getsetters[] = {
     {"_levels", (getter) Dim_get_levels, NULL, "_levels", NULL},
     {"_has_device", (getter) Dim_get_has_device, NULL, "_has_device", NULL},
     {"_tensor", (getter) Dim_get_tensor, NULL, "_tensor", NULL},
-    {"_batchtensor", (getter) Dim_get_batchtensor, NULL, "_tensor", NULL},
-
+    {"_batchtensor", (getter) Dim_get_batchtensor, NULL, "_batchtensor", NULL},
+    {"ndim", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_int(1).release(); }, NULL, "ndim", NULL},
     {NULL}  /* Sentinel */
 };
 
@@ -1335,6 +1335,16 @@ py::object levels_to_tuple(Slice<DimEntry> slice) {
     return r;
 }
 
+PyObject* Tensor_ndim(Tensor* self, void*) {
+    Py_ssize_t i = 0;
+    for (auto l : self->levels()) {
+        if (l.is_positional()) {
+            ++i;
+        }
+    }
+    return py::from_int(i).release();
+}
+
 static PyGetSetDef Tensor_getsetters[] = {
    {"_has_device", (getter) [](PyObject* self, void*) -> PyObject* { return py::from_bool(((Tensor*)self)->has_device()).release(); }, NULL},
    {"_tensor", (getter) [](PyObject* self, void*) -> PyObject* {
@@ -1348,6 +1358,7 @@ static PyGetSetDef Tensor_getsetters[] = {
        return levels_to_tuple(((Tensor*)self)->levels()).release();
        PY_END(nullptr)
    }},
+    {"ndim", (getter) Tensor_ndim, NULL, "ndim", NULL},
     {NULL}  /* Sentinel */
 };
 

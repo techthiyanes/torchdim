@@ -399,10 +399,15 @@ class TestMin(TestCase):
 
     def test_network(self):
         rn = resnet18(norm_layer=lambda x: torch.nn.BatchNorm2d(x, track_running_stats=False))
-        img = torch.rand(2, 1, 3, 224, 224)
+        rn.train()
+        img = torch.rand(1, 2, 3, 224, 224)
+        imgf = img.view(2, 3, 224, 224)
+
         i = dims()
         r = rn(img[i])
-        assert i in r.dims
+        r = r.positional(i).view(2, 1000)
+        r2 = rn(imgf)
+        assert torch.allclose(r2, r, atol=1e-06)
 
     def test_dim_args(self):
         a = dims(lists=1)
