@@ -423,6 +423,24 @@ class TestMin(TestCase):
         i = dims()
         A = torch.rand(4, 4)
         print(A[i, i])
+
+    def test_softmax_split(self):
+        a = torch.rand(16)
+        g, i = dims(2)
+        a2 = a[[i,g]]
+
+        m_b, _ = a2.max(i)
+        f_b = torch.exp(a2 - m_b)
+        l_b = f_b.sum(i)
+
+        m, _ = m_b.max(g)
+        c = torch.exp(m_b - m)
+        f = (c*f_b).positional((i, g))
+        l = (c*l_b).sum(g)
+        assert torch.allclose(f/l, torch.nn.functional.softmax(a, dim=0))
+
+
+
 def do_stuff(a):
     i = dims()
     i.size = 4

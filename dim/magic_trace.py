@@ -18,10 +18,12 @@ def magic_trace(output='trace.fxt', magic_trace_cache='/tmp/magic-trace'):
         print(x)
         if 'Attached' in x:
             break
-    yield
-    p.send_signal(signal.SIGINT)
-    r = p.wait()
-    print(p.stderr.read())
-    p.stderr.close()
-    if r != 0:
-        raise ValueError(f'magic_trace exited abnormally: {r}')
+    try:
+        yield
+    finally:
+        p.send_signal(signal.SIGINT)
+        r = p.wait()
+        print(p.stderr.read())
+        p.stderr.close()
+        if r != 0:
+            raise ValueError(f'magic_trace exited abnormally: {r}')

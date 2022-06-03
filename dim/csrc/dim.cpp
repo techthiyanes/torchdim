@@ -2032,7 +2032,7 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     }
     bool has_dimpacks = false;
     for (auto idx : indices_list) {
-        if (py::tuple_view::check(idx)) {
+        if (py::tuple_view::check(idx) || py::list_view::check(idx)) {
             has_dimpacks = true;
             break;
         }
@@ -2041,13 +2041,32 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     return invoke_getitem(A, info);
 }
 
+Slice<py::handle> maybe_dimpack(py::handle s) {
+        // can we avoid rechecking?
+    if (py::tuple_view::check(s)) {
+        py::tuple_view tv(s);
+        if (tv.size() && Dim::check_exact(tv[0])) {
+            PyObject** begin = &PyTuple_GET_ITEM(s.ptr(),0);
+            return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+        }
+    } else if (py::list_view::check(s)) {
+        py::list_view tv(s);
+        if (tv.size() && Dim::check_exact(tv[0])) {
+            PyObject** begin = &PyList_GET_ITEM(s.ptr(),0);
+            return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+        }
+    }
+    return Slice<py::handle>();
+};
+
 static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, bool tensors_have_dims) {
     bool is_tuple = py::tuple_view::check(index);
+    bool is_list = py::list_view::check(index);
 
     bool can_call_original_getitem = !tensors_have_dims;
 
     // nothing about first class dims here, fallback to getitem
-    if (can_call_original_getitem && !is_tuple && !has_dims(index)) {
+    if (can_call_original_getitem && !is_tuple && !is_list && !has_dims(index)) {
         return { true };
     }
 
@@ -2097,13 +2116,9 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
             dimlists.append(A, i);
         } else if (py::is_none(s)) {
             has_dimpacks_or_none = true;
-        } else if (py::tuple_view::check(s)) {
-            // can we avoid rechecking?
-            py::tuple_view tv(s);
-            if (tv.size() && Dim::check_exact(tv[0])) {
-                can_call_original_getitem = false;
-                has_dimpacks_or_none = true;
-            }
+        } else if (maybe_dimpack(s).size() > 0) {
+            can_call_original_getitem = false;
+            has_dimpacks_or_none = true;
             ++dims_indexed;
         } else {
             ++dims_indexed;
@@ -2241,13 +2256,13 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
             return;
         }
 
-        if (py::tuple_view::check(arg)) {
-            py::tuple_view tv(arg);
-            if (tv.size() && Dim::check(tv[0])) {
+        if (has_dimpacks_or_none) {
+            auto mp = maybe_dimpack(arg);
+            if (mp.size() > 0) {
                 // dim pack
                 Slice<py::hdl<Dim>> dim_pack;
-                for (auto j : tv.enumerate()) {
-                    dim_pack.append(A, Dim::wrap(tv[j]));
+                for (auto d : mp) {
+                    dim_pack.append(A, Dim::wrap(d));
                     add_dim(dim_pack.back());
                     append_flat_handle(dim_pack.back());
                 }
@@ -2255,6 +2270,7 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
                 return;
             }
         }
+
         append_size(i);
         append_flat_handle(arg);
     };
@@ -2401,7 +2417,11 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     maybeInitializeGlobals();
     auto iinfo = getsetitem(A, self, index, has_dims(self));
     if (iinfo.can_call_original) {
-        return py::object::checked_steal(THPVariable_getitem(self.ptr(), index.ptr()));
+        std::cout << "CALLING ORIGINAL!\n";
+        auto r = THPVariable_getitem(self.ptr(), index.ptr());
+        std::cout << py::handle(PyErr_Occurred()) << "\n";
+        auto rr = py::object::checked_steal(r);
+        return rr;
     }
 
     return invoke_getitem(A, iinfo);
