@@ -76,61 +76,6 @@ class _Tensor:
         levels[idx] = -idx_batched - 1
         return Tensor.from_positional(ptensor, levels, self._has_device), idx_batched
 
-    def gather(self, dims, values):
-        if isinstance(dims, int):
-            return self.__torch_function__(torch.Tensor.gather, None, (self, dims, values))
-
-        dims = _dims(dims, None, False, False)
-        if not isinstance(values, (list, tuple, DimList)):
-            values = (values,)
-        add_dim = any(isinstance(v, TensorLike) and v.ndim == 0 for v in values)
-        if add_dim: # add/remove fake dimension to trick advanced indexing
-            values = tuple(v[None] for v in values)
-        r = self.positional(*dims)[values]
-        if add_dim:
-            r = r[0]
-        return r
-
-    def _block(self, f: 'Dim', t: 'Sequence[Dim]'):
-        #  splitting a dimension: f - Dim, t - List[Dim]
-        _bind_one_dim(f, t)
-        if f not in self.dims:
-            raise DimensionMismatchError(f"tensor ({self.dims}) does not have dim: {f}")
-        ptensor, levels = self._tensor, list(self._levels)
-        f_idx = levels.index(f)
-        new_sizes = list(ptensor.size())
-        levels[f_idx:f_idx+1] = t
-        new_sizes[f_idx:f_idx+1] = [e.size for e in t]
-
-        return Tensor.from_positional(ptensor.view(*new_sizes), levels, self._has_device)
-
-    def _flatten(self, f: 'Sequence[Dim]', t: 'Dim'):
-        _bind_one_dim(t, f)
-        ptensor, levels = self._tensor, list(self._levels)
-        indices = tuple(levels.index(e) for e in f)
-        start_idx = min(indices)
-        end_idx = start_idx + len(indices)
-        ptensor = ptensor.movedim(indices, tuple(range(start_idx, end_idx)))
-        ptensor = ptensor.flatten(start_idx, end_idx - 1)
-        for idx in sorted(indices, reverse=True):
-            del levels[idx]
-        levels.insert(start_idx, t)
-        return Tensor.from_positional(ptensor, levels, self._has_device)
-
-    def reshape_dim(self, f: 'Union[Dim, Sequence[Dim]]', t: 'Union[Dim, Sequence[Dim]]'):
-        if not isinstance(f, Dim):
-            if not isinstance(t, Dim):
-                if isinstance(t, DimList) and not t.is_bound:
-                    t.bind_len(len(f))
-                if isinstance(f, DimList) and not f.is_bound:
-                    f.bind_len(len(t))
-                for a,b in zip(f, t):
-                    self = self.reshape(a, b)
-                return self
-            else:
-                return self._flatten(f, t)
-        else:
-            return self._block(f, [t] if isinstance(t, Dim) else t)
 
 TensorLike = (_Tensor, torch.Tensor)
 
@@ -166,7 +111,7 @@ def stack(tensors, new_dim, dim=0, out=None):
 
 def cat(tensors, dim, new_dim):
     n = dims()
-    return stack(tensors, n, dim).reshape_dim((n, dim), new_dim)
+    return stack(tensors, n, dim).index([n, dim], new_dim)
 
 if use_c:
     _wrap = _C._wrap
@@ -310,6 +255,7 @@ def split(self, split_size_or_sections, dim=0):
 torch.Tensor.split = split
 _Tensor.split = split
 torch.Tensor.expand = _C._instancemethod(_C.expand)
+torch.Tensor.index = _C._instancemethod(_C.index)
 wrap_type(use_c, _Tensor, torch.Tensor, _Tensor.__torch_function__)
 
 _def('mean')

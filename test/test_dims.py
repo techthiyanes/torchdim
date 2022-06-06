@@ -106,7 +106,7 @@ class TestMin(TestCase):
         d = dims()
         D = D_[d]
 
-        A.gather([i], [D]).positional(k, d)
+        A.index([i], [D]).positional(k, d)
 
     def attn(self, batch_size = 1, sequence_length = 4, hidden_size = 6, num_attention_heads = 3, linear=Linear, device=None, time=False):
         def maybe_to(x):
@@ -246,13 +246,13 @@ class TestMin(TestCase):
         assert torch.allclose(A.expand(5, -1, -1), A[i, k].expand(j).positional(j, i, k))
         z = dims()
         C = torch.arange(2)
-        assert torch.allclose(A[:,0:2], A[i, k].gather(k, C[z]).positional(i, z))
+        assert torch.allclose(A[:,0:2], A[i, k].index(k, C[z]).positional(i, z))
 
         o,l = dims()
         o.size = 2
-        r = A[i, k].reshape_dim(k, (o, l))
+        r = A[i, k].index(k, (o, l))
         assert torch.allclose(r.positional(i, o, l), A.view(-1, 2, 2))
-        rr = r.reshape_dim((o, l), k)
+        rr = r.index((o, l), k)
         assert torch.allclose(A, rr.positional(i,k))
 
         r = i + k - 1
@@ -459,6 +459,10 @@ class TestMin(TestCase):
         C = torch.arange(2)
         x = A[i, k].index(k, C[z]).positional(i, z)
         assert torch.allclose(A[:,0:2], x)
+
+        C = torch.rand(3, 4, 5)
+        ik = dims()
+        assert torch.allclose(C.index((0,2), ik).positional(ik), C.permute(0,2,1).reshape(15,4))
 
 def do_stuff(a):
     i = dims()

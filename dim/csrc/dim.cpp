@@ -1957,20 +1957,36 @@ struct IndexingInfo {
 };
 
 
-Slice<py::handle> maybe_dimpack(py::handle s) {
+bool maybe_dimpack(Slice<py::handle>& elements, py::handle s, bool check_first=true) {
     // can we avoid rechecking?
     if (py::list_view::check(s)) {
         py::list_view tv(s);
-        if (tv.size() && Dim::check_exact(tv[0])) {
+        if (!check_first || (tv.size() && Dim::check_exact(tv[0]))) {
             PyObject** begin = &PyList_GET_ITEM(s.ptr(),0);
-            return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+            elements = Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+            return true;
         }
     }
-    return Slice<py::handle>();
+    // can we avoid rechecking?
+    if (py::tuple_view::check(s)) {
+        py::tuple_view tv(s);
+        if (!check_first || (tv.size() && Dim::check_exact(tv[0]))) {
+            PyObject** begin = &PyTuple_GET_ITEM(s.ptr(),0);
+            elements = Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+            return true;
+        }
+    }
+    return false;
 };
+
+bool is_dimpack(py::handle s) {
+    Slice<py::handle> e;
+    return maybe_dimpack(e, s);
+}
 
 IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> input, Slice<DimEntry> keys, Slice<py::handle> values, bool has_dimpacks_or_none);
 static py::object invoke_getitem(Arena& A, const IndexingInfo& iinfo);
+static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim);
 
 static py::object index(Arena& A, py::handle self, py::handle dims, py::handle indices) {
     maybeInitializeGlobals();
@@ -1999,13 +2015,33 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     // dims being indexed can be grouped together into a single index space, and we have to
     // flatten them int a single dimension before we can index them...
     auto self_info = TensorInfo::create(A, self, false);
+    auto ndim = self_info.ndim();
     Slice<DimEntry> new_levels;
     Slice<DimEntry> to_flatten;
     Slice<DimEntry> dims_list_flat;
+    auto parse_dim_entry = [&](py::handle s) -> DimEntry {
+        auto d = _wrap_dim(s, ndim, false);
+        if (d.is_none()) {
+            py::raise_error(PyExc_TypeError, "expected a dimension specifyer but found %R", s.ptr());
+        }
+        return d;
+    };
+    auto dim_not_present = [&](DimEntry d) {
+        if (d.is_positional()) {
+            py::raise_error(PyExc_TypeError, "dimension %d not in tensor of %d dimensions", d.position() + ndim , ndim);
+        } else {
+            py::raise_error(PyExc_TypeError, "dimension %R not in tensor", d.dim()->ptr());
+        }
+    };
+
     for (auto i : dims_list.enumerate()) {
-        auto m = maybe_dimpack(dims_list[i]);
-        if (m.size() > 0) {
-            auto first = Dim::wrap(m[0]);
+        Slice<py::handle> m;
+        if (maybe_dimpack(m, dims_list[i], /*check_first=*/false)) {
+            if (m.size() == 0) {
+                // plausible semantics work for this to have 0 elements (e.g. the index will always be 0)
+                dims_list_flat.append(A, DimEntry()); // value is just dropped
+            }
+            auto first = parse_dim_entry(m[0]);
             dims_list_flat.append(A, first);
             if (m.size() == 1) {
                 continue;
@@ -2015,16 +2051,16 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
             }
             Slice<DimEntry> rest;
             for (auto i : irange(1, m.size())) {
-                auto d = Dim::wrap(m[i]);
+                auto d = parse_dim_entry(m[i]);
                 if (!new_levels.remove(A, d)) {
-                     py::raise_error(PyExc_TypeError, "dimension %R not in tensor", d->ptr());
+                    dim_not_present(d);
                 }
                 rest.append(A, d);
             }
 
             auto first_idx = new_levels.index(first);
             if (!first_idx) {
-                py::raise_error(PyExc_TypeError, "dimension %R not in tensor", first->ptr());
+                dim_not_present(first);
             }
             new_levels.insert(A, new_levels.slice(*first_idx + 1, *first_idx + 1), rest);
             to_flatten.extend(A, rest);
@@ -2034,7 +2070,7 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     }
     if (to_flatten.size() > 0) {
         TensorRef rearranged = _match_levels(A, self_info.tensor, self_info.levels, new_levels);
-        at::IntArrayRef sizes = self_info.tensor->sizes();
+        at::IntArrayRef sizes = rearranged->sizes();
         Slice<int64_t> new_sizes;
         Slice<DimEntry> reshape_levels;
         for (auto i : new_levels.enumerate()) {
@@ -2045,7 +2081,6 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
                 reshape_levels.append(A, new_levels[i]);
             }
         }
-
         self_info.tensor = A.autorelease(rearranged->reshape(at::IntArrayRef(new_sizes.begin(), new_sizes.end())));
 
         self_info.levels = reshape_levels; // note: we are using the first level in a flattened group to represent the group for the rest of the op
@@ -2119,7 +2154,7 @@ static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, boo
             dimlists.append(A, i);
         } else if (py::is_none(s)) {
             has_dimpacks_or_none = true;
-        } else if (maybe_dimpack(s).size() > 0) {
+        } else if (is_dimpack(s)) {
             can_call_original_getitem = false;
             has_dimpacks_or_none = true;
             ++dims_indexed;
@@ -2260,8 +2295,8 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
         }
 
         if (has_dimpacks_or_none) {
-            auto mp = maybe_dimpack(arg);
-            if (mp.size() > 0) {
+            Slice<py::handle> mp;
+            if (maybe_dimpack(mp, arg)) {
                 // dim pack
                 Slice<py::hdl<Dim>> dim_pack;
                 for (auto d : mp) {
@@ -2282,12 +2317,15 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
     // self may have first-class dims, which do not participate the indexing.
     for (auto i : self_info.levels.enumerate()) {
         auto l = self_info.levels[i];
-        if (l.is_positional()) {
+        auto idx = keys.index(l);
+        if (idx) {
+            append_item(i, values[*idx]);
+        } else if (l.is_positional()) {
             // grab and index from the positional list
             parse_nones();
-            // we might have fewer indices than tensor dimensions,
-            // which implicitly indexes the remaining dimensions with :
             if (!input_it.size()) {
+                // we might have fewer indices than tensor dimensions,
+                // which implicitly indexes the remaining dimensions with :
                 append_flat_handle(no_slice);
                 append_size(i);
             } else {
@@ -2296,15 +2334,9 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
                 append_item(i, arg);
             }
         } else {
-            // grab an index from the dimension list
-            auto d = l.dim();
-            if (auto idx = keys.index(d)) {
-                append_item(i, values[*idx]);
-            } else {
-                add_dim(l.dim());
-                append_flat_handle(l.dim());
-                append_size(i);
-            }
+            add_dim(l.dim());
+            append_flat_handle(l.dim());
+            append_size(i);
         }
     }
     // any training Nones may have no existing dimension associated with them in self.
@@ -2499,7 +2531,7 @@ static PyObject* py_index(PyObject *_,
     PY_END(nullptr)
 }
 
-static DimEntry _wrap_dim(Arena& A, py::handle d, size_t N, bool keepdim) {
+static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim) {
     if (Dim::check(d)) {
         if (keepdim) {
             py::raise_error(PyExc_ValueError, "cannot preserve first-class dimensions with keepdim=True");
@@ -2517,14 +2549,14 @@ static DimEntry _wrap_dim(Arena& A, py::handle d, size_t N, bool keepdim) {
 }
 
 static Slice<DimEntry> _dims(Arena& A, py::handle d, size_t N, bool keepdim) {
-    auto de = _wrap_dim(A, d, N, keepdim);
+    auto de = _wrap_dim(d, N, keepdim);
     Slice<DimEntry> r;
     if (!de.is_none()) {
         r.append(A, de);
     } else {
         py::sequence_view sq(d);
         for (auto i : sq.enumerate()) {
-            r.append(A, _wrap_dim(A, A.autorelease(sq[i]), N, keepdim));
+            r.append(A, _wrap_dim(A.autorelease(sq[i]), N, keepdim));
         }
     }
     return r;
