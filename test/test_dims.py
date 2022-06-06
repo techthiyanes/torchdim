@@ -444,7 +444,21 @@ class TestMin(TestCase):
         l = (c*l_b).sum(g)
         assert torch.allclose(f/l, torch.nn.functional.softmax(a, dim=0))
 
+    def test_index(self):
+        A = torch.rand(3, 4)
+        B = torch.rand(4, 5)
+        i, j, k = dims()
 
+        o,l = dims()
+        o.size = 2
+        r = A[i, k].index(k, [o, l])
+        assert torch.allclose(r.positional(i, o, l), A.view(-1, 2, 2))
+        rr = r.index([o, l], k)
+        assert torch.allclose(A, rr.positional(i,k))
+        z = dims()
+        C = torch.arange(2)
+        x = A[i, k].index(k, C[z]).positional(i, z)
+        assert torch.allclose(A[:,0:2], x)
 
 def do_stuff(a):
     i = dims()

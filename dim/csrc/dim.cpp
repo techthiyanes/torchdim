@@ -1957,6 +1957,18 @@ struct IndexingInfo {
 };
 
 
+Slice<py::handle> maybe_dimpack(py::handle s) {
+    // can we avoid rechecking?
+    if (py::list_view::check(s)) {
+        py::list_view tv(s);
+        if (tv.size() && Dim::check_exact(tv[0])) {
+            PyObject** begin = &PyList_GET_ITEM(s.ptr(),0);
+            return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+        }
+    }
+    return Slice<py::handle>();
+};
+
 IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> input, Slice<DimEntry> keys, Slice<py::handle> values, bool has_dimpacks_or_none);
 static py::object invoke_getitem(Arena& A, const IndexingInfo& iinfo);
 
@@ -1964,11 +1976,10 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     maybeInitializeGlobals();
     Slice<py::handle> dims_list;
     Slice<py::handle> indices_list;
-
     // we allow for matching single dims to multiple dims,
     // so we first have to normalize everything into the case where there is a list on lhs and the rhs
-    bool lhs_list = py::is_sequence(dims);
-    bool rhs_list = py::is_sequence(indices);
+    bool lhs_list = py::tuple_view::check(dims) || py::list_view::check(dims);
+    bool rhs_list = py::tuple_view::check(indices) || py::list_view::check(indices);
     if (lhs_list && rhs_list) {
         py::sequence_view dv(dims);
         py::sequence_view ind(indices);
@@ -1992,22 +2003,19 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     Slice<DimEntry> to_flatten;
     Slice<DimEntry> dims_list_flat;
     for (auto i : dims_list.enumerate()) {
-        if (py::tuple_view::check(dims_list[i])) {
-            py::tuple_view t(dims_list[i]);
-            if (t.size() == 0) {
-                py::raise_error(PyExc_TypeError, "expected at least one dimension in tuple pack");
-            }
-            auto first = Dim::wrap(t[0]);
+        auto m = maybe_dimpack(dims_list[i]);
+        if (m.size() > 0) {
+            auto first = Dim::wrap(m[0]);
             dims_list_flat.append(A, first);
-            if (t.size() == 1) {
+            if (m.size() == 1) {
                 continue;
             }
             if (to_flatten.size() == 0) {
                 new_levels.extend(A, self_info.levels);
             }
             Slice<DimEntry> rest;
-            for (auto i : irange(2, t.size())) {
-                auto d = Dim::wrap(t[i]);
+            for (auto i : irange(1, m.size())) {
+                auto d = Dim::wrap(m[i]);
                 if (!new_levels.remove(A, d)) {
                      py::raise_error(PyExc_TypeError, "dimension %R not in tensor", d->ptr());
                 }
@@ -2021,7 +2029,7 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
             new_levels.insert(A, new_levels.slice(*first_idx + 1, *first_idx + 1), rest);
             to_flatten.extend(A, rest);
         } else {
-            dims_list_flat.append(A, Dim::check(dims_list[i]));
+            dims_list_flat.append(A, Dim::wrap(dims_list[i]));
         }
     }
     if (to_flatten.size() > 0) {
@@ -2037,7 +2045,9 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
                 reshape_levels.append(A, new_levels[i]);
             }
         }
+
         self_info.tensor = A.autorelease(rearranged->reshape(at::IntArrayRef(new_sizes.begin(), new_sizes.end())));
+
         self_info.levels = reshape_levels; // note: we are using the first level in a flattened group to represent the group for the rest of the op
                                            // we need to be careful not to rely the dimensions size because it doesnt match the size of the whole group
     }
@@ -2051,18 +2061,6 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     IndexingInfo info = getsetitem_flat(A, self_info, Slice<py::handle>(), dims_list_flat, indices_list, has_dimpacks);
     return invoke_getitem(A, info);
 }
-
-Slice<py::handle> maybe_dimpack(py::handle s) {
-    // can we avoid rechecking?
-    if (py::list_view::check(s)) {
-        py::list_view tv(s);
-        if (tv.size() && Dim::check_exact(tv[0])) {
-            PyObject** begin = &PyList_GET_ITEM(s.ptr(),0);
-            return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
-        }
-    }
-    return Slice<py::handle>();
-};
 
 static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, bool tensors_have_dims) {
     bool is_tuple = py::tuple_view::check(index);
