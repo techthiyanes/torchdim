@@ -126,68 +126,11 @@ else:
 # note: there is not python reference
 t__setitem__ = _C._instancemethod(_C.__setitem__)
 
-def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
-    not_bound = tuple((i, r) for i, r in enumerate(rhs) if not r.is_bound)
-    if len(not_bound) == 1:
-        idx, d = not_bound[0]
-        rhs_so_far = prod(r.size for r in rhs if r.is_bound)
-        if lhs_size % rhs_so_far != 0:
-            raise DimensionMismatchError(f"inferred dimension does not evenly fit into larger dimension: {lhs_size} vs {tuple('?' if not r.is_bound else str(r.size) for r in rhs)}")
-        new_size = lhs_size // rhs_so_far
-        d.size = new_size
-    elif len(not_bound) > 1:
-        raise DimensionMismatchError(f"cannot infer the size of two dimensions at once: {rhs} with sizes {tuple('?' if not r.is_bound else str(r.size) for r in rhs)}")
-    else:
-        rhs_size = prod(r.size for r in rhs)
-        if lhs_size != rhs_size:
-            raise DimensionMismatchError(f"Dimension sizes to do not match ({lhs_size} != {rhs_size}) when matching {lhs_debug} to {rhs}")
-
-def _bind_one_dim(lhs: 'Dim', rhs: 'Sequence[Dim]'):
-    if not lhs.is_bound:
-        lhs.size = prod(r.size for r in rhs)
-    else:
-        _bind_dims_to_size(lhs.size, rhs, lhs)
-
-
-def _wrap_dim(d, N, keepdim):
-    if isinstance(d, Dim):
-        assert not keepdim, "cannot preserve first-class dimensions with keepdim=True"
-        return d
-    elif d >= 0:
-        return d - N
-    else:
-        return d
-
 def _tensor_levels(inp):
     if isinstance(inp, _Tensor):
         return inp._tensor, list(inp._levels), inp._has_device
     else:
         return inp, list(range(-inp.ndim, 0)), True
-
-def _match_levels(v, from_levels, to_levels):
-    view = []
-    permute = []
-    requires_view = False
-    size = v.size()
-    for t in to_levels:
-        try:
-            idx = from_levels.index(t)
-            permute.append(idx)
-            view.append(size[idx])
-        except ValueError:
-            view.append(1)
-            requires_view = True
-    if permute != list(range(len(permute))):
-        v = v.permute(*permute)
-    if requires_view:
-        v = v.view(*view)
-    return v
-
-def _dims(d, N, keepdim, single_dim):
-    if isinstance(d, (Dim, int)):
-        return (_wrap_dim(d, N, keepdim),)
-    assert not single_dim, f"expected a single dimension or int but found: {d}"
-    return tuple(_wrap_dim(x, N, keepdim) for x in d)
 
 
 def _bind(self, offset, dims):
