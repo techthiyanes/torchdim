@@ -1,5 +1,7 @@
 import torch
-from . import _Tensor, _dims, Tensor
+from . import _Tensor, Tensor
+from .reference import _dims
+from .reference import _enable_layers
 
 class DelayedMulTensor(_Tensor):
     def __init__(self, lhs, rhs):
@@ -7,6 +9,8 @@ class DelayedMulTensor(_Tensor):
         self._data = None
         self._levels_data = None
         self._has_device = lhs._has_device or rhs._has_device
+        self._batchtensor_data = None
+        self._tensor_data = None
 
     @property
     def _levels(self):
@@ -28,7 +32,9 @@ class DelayedMulTensor(_Tensor):
 
     @property
     def _tensor(self):
-        raise NotImplementedError()
+        if self._tensor_data is None:
+            self._tensor_data = Tensor.from_batched(self._batchtensor, self._has_device)._tensor
+        return self._tensor_data
 
     def sum(self, dim):
         dims = _dims(dim, 0, False, False)

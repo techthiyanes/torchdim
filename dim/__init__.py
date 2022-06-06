@@ -15,11 +15,7 @@ class DimensionMismatchError(Exception):
 class DimensionBindError(Exception):
     pass
 
-from functools import reduce
-import operator
 from . import op_properties
-
-prod = lambda x: reduce(operator.mul, x, 1)
 
 # use dict to avoid writing C++ bindings for set
 pointwise = {t: True for t in op_properties.pointwise}
@@ -94,7 +90,7 @@ class Tensor(_Tensor, _C.Tensor):
 # XXX - dim is optional and can be the outer-most dimension...
 def stack(tensors, new_dim, dim=0, out=None):
     if isinstance(dim, int):
-        return _bind(torch.stack(tensors, dim, out), (dim,), (new_dim,))
+        return torch.stack(tensors, dim, out).index(dim, new_dim)
     index = None
     if out is not None:
         out, index = out._positional_no_permute(dim, expand_dim=True)
@@ -107,7 +103,7 @@ def stack(tensors, new_dim, dim=0, out=None):
             index = pi
         ptensors.append(pt)
     pr = torch.stack(ptensors, index, out=out)
-    return _bind(pr, (index, index + 1), (new_dim, dim))
+    return pr.index((index, index + 1), (new_dim, dim))
 
 def cat(tensors, dim, new_dim):
     n = dims()
@@ -131,28 +127,6 @@ def _tensor_levels(inp):
         return inp._tensor, list(inp._levels), inp._has_device
     else:
         return inp, list(range(-inp.ndim, 0)), True
-
-
-def _bind(self, offset, dims):
-    ptensor, levels, has_device = _tensor_levels(self)
-    next_idx = 0
-    for i, (l, sz) in enumerate(zip(levels, ptensor.size())):
-        if isinstance(l, int):
-            try:
-                idx =offset.index(next_idx)
-                d = levels[i] = dims[idx]
-                d.size = sz
-            except ValueError:
-                pass
-            next_idx += 1
-
-    next_non_dim = -1
-    for i in range(len(levels) - 1, -1, -1):
-        if isinstance(levels[i], int):
-            levels[i] = next_non_dim
-            next_non_dim -= 1
-    return Tensor.from_positional(ptensor, levels, has_device)
-
 
 torch.Tensor.__getitem__ = t__getitem__
 _Tensor.__getitem__ = t__getitem__
@@ -193,7 +167,7 @@ def split(self, split_size_or_sections, dim=0):
             remaining_size -= sz
     else:
         assert total_bound_size == size, f"result dimensions do not match original: {total_bound_size} vs {size} ({split_size_or_sections})"
-    return tuple(_bind(t, (dim,), (d,)) for d, t in zip(split_size_or_sections, _orig_split(self, sizes, dim=dim)))
+    return tuple(t.index(dim, d) for d, t in zip(split_size_or_sections, _orig_split(self, sizes, dim=dim)))
 
 torch.Tensor.split = split
 _Tensor.split = split

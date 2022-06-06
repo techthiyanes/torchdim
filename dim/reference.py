@@ -5,14 +5,79 @@ from .batch_tensor import _enable_layers
 from . import op_properties
 from dim._C import DimList
 from collections import defaultdict
+from functools import reduce
+import operator
+
 
 # use dict to avoid writing C++ bindings for set
 pointwise = set(op_properties.pointwise)
+prod = lambda x: reduce(operator.mul, x, 1)
+
+
+def _wrap_dim(d, N, keepdim):
+    from . import Dim
+    if isinstance(d, Dim):
+        assert not keepdim, "cannot preserve first-class dimensions with keepdim=True"
+        return d
+    elif d >= 0:
+        return d - N
+    else:
+        return d
+
+def _dims(d, N, keepdim, single_dim):
+    from . import Dim
+    if isinstance(d, (Dim, int)):
+        return (_wrap_dim(d, N, keepdim),)
+    assert not single_dim, f"expected a single dimension or int but found: {d}"
+    return tuple(_wrap_dim(x, N, keepdim) for x in d)
+
+def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
+    from . import DimensionMismatchError
+    not_bound = tuple((i, r) for i, r in enumerate(rhs) if not r.is_bound)
+    if len(not_bound) == 1:
+        idx, d = not_bound[0]
+        rhs_so_far = prod(r.size for r in rhs if r.is_bound)
+        if lhs_size % rhs_so_far != 0:
+            raise DimensionMismatchError(f"inferred dimension does not evenly fit into larger dimension: {lhs_size} vs {tuple('?' if not r.is_bound else str(r.size) for r in rhs)}")
+        new_size = lhs_size // rhs_so_far
+        d.size = new_size
+    elif len(not_bound) > 1:
+        raise DimensionMismatchError(f"cannot infer the size of two dimensions at once: {rhs} with sizes {tuple('?' if not r.is_bound else str(r.size) for r in rhs)}")
+    else:
+        rhs_size = prod(r.size for r in rhs)
+        if lhs_size != rhs_size:
+            raise DimensionMismatchError(f"Dimension sizes to do not match ({lhs_size} != {rhs_size}) when matching {lhs_debug} to {rhs}")
+
+def _tensor_levels(inp):
+    from . import _Tensor
+    if isinstance(inp, _Tensor):
+        return inp._tensor, list(inp._levels), inp._has_device
+    else:
+        return inp, list(range(-inp.ndim, 0)), True
+
+def _match_levels(v, from_levels, to_levels):
+    view = []
+    permute = []
+    requires_view = False
+    size = v.size()
+    for t in to_levels:
+        try:
+            idx = from_levels.index(t)
+            permute.append(idx)
+            view.append(size[idx])
+        except ValueError:
+            view.append(1)
+            requires_view = True
+    if permute != list(range(len(permute))):
+        v = v.permute(*permute)
+    if requires_view:
+        v = v.view(*view)
+    return v
 
 
 @classmethod
 def __torch_function__(self, orig, cls, args, kwargs={}):
-    from . import _Tensor, TensorLike, _tensor_levels, _match_levels, Tensor, _enable_layers
+    from . import _Tensor, TensorLike, Tensor, _enable_layers
     from .delayed_mul_tensor import DelayedMulTensor
 
     if orig is torch.Tensor.__mul__:
@@ -75,7 +140,7 @@ def __torch_function__(self, orig, cls, args, kwargs={}):
             return tree_map(wrap, result)
 
 def positional(self, *dims):
-    from . import Dim, Tensor, prod
+    from . import Dim, Tensor
     ptensor, levels = self._tensor, list(self._levels)
     flat_dims = []
     view = []
@@ -140,7 +205,7 @@ def _patcharg(name, offset, args, kwargs, value):
         kwargs[name] = value
 
 def _wrap(orig, dim_offset=0, keepdim_offset=1, dim_name='dim', single_dim=False, reduce=True):
-    from . import TensorLike, Dim, _dims, Tensor
+    from . import TensorLike, Dim, Tensor
     def fn(self, *args, **kwargs):
         dim = _getarg(dim_name, dim_offset, args, kwargs, _not_present)
         if dim is _not_present or (single_dim and not isinstance(dim, Dim)):
@@ -180,7 +245,7 @@ no_slice = slice(None)
 _orig_getitem = torch.Tensor.__getitem__
 
 def t__getitem__(self, input):
-    from . import Dim, DimensionBindError, _Tensor, TensorLike, DimList, Tensor, _bind_dims_to_size, _tensor_levels, _match_levels
+    from . import Dim, DimensionBindError, _Tensor, TensorLike, DimList, Tensor
     # * bail to original example if we have a single non-Dim tensor, or a non-tensor
     # * locate ... or an unbound tensor list, and determine its size, bind dim list
     #   (remember that None does not count to the total dim count)
@@ -193,7 +258,7 @@ def t__getitem__(self, input):
 
     # this handles bool indexing handling, as well as some other simple cases.
     if (not isinstance(input, Dim) and
-        not isinstance(input, tuple) and
+        not isinstance(input, (tuple,list)) and
         # WAR for functorch bug where zero time tensors in getitem are not handled correctly.
         not (isinstance(input, TensorLike) and input.ndim == 0)):
             if isinstance(self, _Tensor):
@@ -260,7 +325,7 @@ def t__getitem__(self, input):
                 idx.size = sz
                 dims_seen[idx] += 1
                 view_sizes.append(sz)
-            elif isinstance(idx, tuple) and idx and isinstance(idx[0], Dim):
+            elif isinstance(idx, (tuple, list)) and idx and isinstance(idx[0], Dim):
                 for d in idx:
                     dims_seen[d] += 1
                 _bind_dims_to_size(sz, idx, f'offset {i}')

@@ -2065,7 +2065,7 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
             new_levels.insert(A, new_levels.slice(*first_idx + 1, *first_idx + 1), rest);
             to_flatten.extend(A, rest);
         } else {
-            dims_list_flat.append(A, Dim::wrap(dims_list[i]));
+            dims_list_flat.append(A, parse_dim_entry(dims_list[i]));
         }
     }
     if (to_flatten.size() > 0) {
