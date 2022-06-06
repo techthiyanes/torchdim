@@ -87,24 +87,6 @@ class Tensor(_Tensor, _C.Tensor):
     from_positional = staticmethod(_C.Tensor_from_positional)
     sum = _C._instancemethod(_C.Tensor_sum)
 
-# XXX - dim is optional and can be the outer-most dimension...
-def stack(tensors, new_dim, dim=0, out=None):
-    if isinstance(dim, int):
-        return torch.stack(tensors, dim, out).index(dim, new_dim)
-    index = None
-    if out is not None:
-        out, index = out._positional_no_permute(dim, expand_dim=True)
-    ptensors = []
-    for t in tensors:
-        pt, pi = t._positional_no_permute(dim, expand_dim=True)
-        if index is not None and pi != index:
-            pt = pt.move_dim(pi, index)
-        else:
-            index = pi
-        ptensors.append(pt)
-    pr = torch.stack(ptensors, index, out=out)
-    return pr.index((index, index + 1), (new_dim, dim))
-
 def cat(tensors, dim, new_dim):
     n = dims()
     return stack(tensors, n, dim).index([n, dim], new_dim)
@@ -115,18 +97,14 @@ if use_c:
         orig = getattr(torch.Tensor, name)
         setattr(_Tensor, name, _C._instancemethod(_wrap(orig, *args, **kwargs)))
     t__getitem__ = _C._instancemethod(_C.__getitem__)
+    stack = _C.stack
 else:
     _wrap, _def = reference._wrap, reference._def
     t__getitem__ = reference.t__getitem__
+    stack = reference.stack
 
 # note: there is not python reference
 t__setitem__ = _C._instancemethod(_C.__setitem__)
-
-def _tensor_levels(inp):
-    if isinstance(inp, _Tensor):
-        return inp._tensor, list(inp._levels), inp._has_device
-    else:
-        return inp, list(range(-inp.ndim, 0)), True
 
 torch.Tensor.__getitem__ = t__getitem__
 _Tensor.__getitem__ = t__getitem__

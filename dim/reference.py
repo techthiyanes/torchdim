@@ -406,3 +406,21 @@ def t__getitem__(self, input):
             next_positional -= 1
 
     return Tensor.from_positional(result, result_levels, has_device)
+
+# XXX - dim is optional and can be the outer-most dimension...
+def stack(tensors, new_dim, dim=0, out=None):
+    if isinstance(dim, int):
+        return torch.stack(tensors, dim, out).index(dim, new_dim)
+    index = None
+    if out is not None:
+        out, index = out._positional_no_permute(dim, expand_dim=True)
+    ptensors = []
+    for t in tensors:
+        pt, pi = t._positional_no_permute(dim, expand_dim=True)
+        if index is not None and pi != index:
+            pt = pt.move_dim(pi, index)
+        else:
+            index = pi
+        ptensors.append(pt)
+    pr = torch.stack(ptensors, index, out=out)
+    return pr.index((index, index + 1), (new_dim, dim))

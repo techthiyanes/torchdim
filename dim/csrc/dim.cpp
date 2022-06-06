@@ -2531,6 +2531,52 @@ static PyObject* py_index(PyObject *_,
     PY_END(nullptr)
 }
 
+
+static PyObject* py_stack(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    py::vector_args va(args, nargs, kwnames);
+    py::handle tensors, new_dim, dim;
+    va.parse("stack", {"tensors", "new_dim", "dim"}, {&tensors, &new_dim, &dim}, 2);
+
+    Slice<DimEntry> result_levels;
+    Slice<TensorInfo> infos;
+    py::sequence_view sv(tensors);
+    auto new_dim_d = Dim::wrap(new_dim);
+    for (auto i : sv.enumerate()) {
+        infos.append(A, TensorInfo::create(A, A.autorelease(sv[i]), false));
+        for (auto l : infos.back().levels) {
+            if (!result_levels.contains(l)) {
+                result_levels.append(A, l);
+            }
+        }
+    }
+    new_dim_d->set_size(infos.size());
+    std::vector<at::Tensor> inputs;
+    inputs.reserve(infos.size());
+    for (auto in : infos) {
+        inputs.emplace_back(*_match_levels(A, in.tensor, in.levels, result_levels));
+    }
+    auto ndim = ndim_of_levels(result_levels);
+    int64_t rawdim = 0;
+    if (dim.ptr()) {
+        auto d = _wrap_dim(dim, ndim, false);
+        auto idx = result_levels.index(d);
+        if (!idx) {
+            py::raise_error(PyExc_TypeError, "Dimension %R does not exist in inputs", dim);
+        }
+        rawdim = *idx;
+    }
+    auto result = at::stack(inputs, rawdim);
+    result_levels.insert(A, rawdim, new_dim_d);
+    return Tensor::from_positional(A, std::move(result), result_levels, true).release();
+    PY_END(nullptr)
+}
+
+
 static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim) {
     if (Dim::check(d)) {
         if (keepdim) {
@@ -2820,6 +2866,7 @@ static PyMethodDef methods[] = {
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
     {"index", (PyCFunction) py_index, METH_FASTCALL | METH_KEYWORDS},
+    {"stack", (PyCFunction) py_stack, METH_FASTCALL | METH_KEYWORDS},
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
     {"__setitem__", (PyCFunction) py___setitem__, METH_FASTCALL | METH_KEYWORDS},
