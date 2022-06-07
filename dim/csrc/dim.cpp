@@ -41,6 +41,7 @@ objobjargproc THPVariable_setitem;
 py::handle no_slice;
 PyTypeObject* torch_Tensor;
 py::handle torch_Tensor_copy_;
+py::handle torch_Tensor_split;
 
 static void maybeInitializeGlobals() {
     if (empty_dict.ptr()) {
@@ -55,6 +56,7 @@ static void maybeInitializeGlobals() {
     NamedTuple = py::import("typing").attr("NamedTuple");
     pointwise = dim.attr("pointwise");
     torch_Tensor_expand = torch.attr("_C").attr("_TensorBase").attr("expand");
+    torch_Tensor_split = torch.attr("_C").attr("_TensorBase").attr("split");
     torch_Tensor_copy_ = torch.attr("Tensor").attr("copy_");
     auto TensorBase = (PyTypeObject*) torch.attr("_C").attr("_TensorBase").ptr();
     THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
@@ -2576,6 +2578,104 @@ static PyObject* py_stack(PyObject *_,
     PY_END(nullptr)
 }
 
+static PyObject* py_split(PyObject *_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    Arena A;
+    PY_BEGIN
+    maybeInitializeGlobals();
+    py::vector_args va(args, nargs, kwnames);
+    py::handle self, split_size_or_sections, dim;
+    va.parse("split", {"self", "split_size_or_sections", "dim"}, {&self, &split_size_or_sections, &dim}, 2);
+    bool dim_is_object = dim.ptr() && Dim::check_exact(dim);
+    Slice<py::handle> sizes;
+
+    bool all_dims = true;
+    bool all_ints = true;
+
+    if (!py::is_int(split_size_or_sections)) {
+        py::sequence_view sv(split_size_or_sections);
+        for (auto i : sv.enumerate()) {
+            sizes.append(A, A.autorelease(sv[i]));
+            if (Dim::check_exact(sizes.back())) {
+                all_ints = false;
+            } else {
+                all_dims = false;
+            }
+        }
+    }
+    if (all_ints) {
+        if (dim_is_object) {
+            py::raise_error(PyExc_TypeError, "when dim is specified as a Dim object, split sizes must also be dimensions.");
+        }
+        // call original split (if self has dimensions this will use torch function to do the split)
+        return torch_Tensor_split.call_vector(py::vector_args(args, nargs, kwnames)).release();
+    }
+    if (!all_dims) {
+        py::raise_error(PyExc_TypeError, "split list must be ints or dims but got a mix");
+    }
+
+    auto self_info = TensorInfo::create(A, self, false);
+    auto ndim = self_info.ndim();
+    if (!dim_is_object&& ndim == 0) {
+        py::raise_error(PyExc_TypeError, "split expects at least a 1-dimension tensor");
+    }
+    DimEntry dim_l = dim.ptr() ? _wrap_dim(dim, ndim, false) : -ndim;
+
+    auto idx = self_info.levels.index(dim_l);
+    if (!idx) {
+        if (!dim.ptr()) {
+            dim = A.autorelease(py::from_int(0));
+        }
+        py::raise_error(PyExc_TypeError, "tensor does not comtain dimension %R", dim.ptr());
+    }
+    Slice<int64_t> indices;
+
+    int64_t total_size = 0;
+    Slice<int64_t> unbound;
+    for (auto i : sizes.enumerate()) {
+        auto d = Dim::unchecked_wrap(sizes[i]);
+        if (d->is_bound()) {
+            indices.append(A, d->size());
+            total_size += indices.back();
+        } else {
+            indices.append(A, 0);
+            unbound.append(A, i);
+        }
+    }
+    auto tensor_size = self_info.tensor->sizes()[*idx];
+
+    if (unbound.size()) {
+        if (total_size > tensor_size) {
+           py::raise_error(PyExc_TypeError, "sizes of target dimensions add up to more (%d) than source dim (%d)", int(total_size), int(tensor_size));
+        }
+        auto remaining_size = tensor_size - total_size;
+        auto chunk_size = (remaining_size + unbound.size() - 1) / unbound.size();
+        for (auto u : unbound) {
+            auto sz = std::min(chunk_size, remaining_size);
+            Dim::unchecked_wrap(sizes[u])->set_size(sz);
+            indices[u] = sz;
+            remaining_size -= sz;
+        }
+    } else if (tensor_size != total_size) {
+        py::raise_error(PyExc_TypeError, "sum of sizes of target dimensions (%d) do not match the than source dim (%d)", int(total_size), int(tensor_size));
+    }
+
+    auto result_tensors = self_info.tensor->split_with_sizes(at::IntArrayRef(indices.begin(), indices.end()), *idx);
+    py::tuple result(result_tensors.size());
+    Slice<DimEntry> new_levels;
+    new_levels.extend(A, self_info.levels);
+    for (auto i : sizes.enumerate()) {
+        new_levels[*idx] = Dim::unchecked_wrap(sizes[i]);
+        result.set(i, Tensor::from_positional(A, std::move(result_tensors[i]), new_levels, true));
+    }
+
+    return result.release();
+
+    PY_END(nullptr)
+}
+
 
 static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim) {
     if (Dim::check(d)) {
@@ -2867,6 +2967,7 @@ static PyMethodDef methods[] = {
     {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
     {"index", (PyCFunction) py_index, METH_FASTCALL | METH_KEYWORDS},
     {"stack", (PyCFunction) py_stack, METH_FASTCALL | METH_KEYWORDS},
+    {"split", (PyCFunction) py_split, METH_FASTCALL | METH_KEYWORDS},
     {"expand", (PyCFunction) expand, METH_FASTCALL | METH_KEYWORDS},
     {"__getitem__", (PyCFunction) py___getitem__, METH_FASTCALL | METH_KEYWORDS},
     {"__setitem__", (PyCFunction) py___setitem__, METH_FASTCALL | METH_KEYWORDS},

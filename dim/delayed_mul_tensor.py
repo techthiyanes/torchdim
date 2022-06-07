@@ -35,6 +35,10 @@ class DelayedMulTensor(_Tensor):
         if self._tensor_data is None:
             self._tensor_data = Tensor.from_batched(self._batchtensor, self._has_device)._tensor
         return self._tensor_data
+    @property
+    def ndim(self):
+        return self._batchtensor.ndim
+
 
     def sum(self, dim):
         dims = _dims(dim, 0, False, False)
