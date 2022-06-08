@@ -5,11 +5,13 @@
 #include <new>
 #include <iostream>
 #include <vector>
-#include <torch/csrc/autograd/python_variable.h>
+//#include <torch/csrc/autograd/python_variable.h>
+#include <torch/csrc/Export.h>
 #include <functorch/csrc/BatchedTensorImpl.h>
 #include <ATen/ATen.h>
 #include <memory>
 #include "arena.h"
+#include "python_variable_simple.h"
 
 
 // C++ API functions for objects to
