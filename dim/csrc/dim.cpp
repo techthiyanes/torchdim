@@ -45,27 +45,58 @@ PyTypeObject* torch_Tensor;
 py::handle torch_Tensor_copy_;
 py::handle torch_Tensor_split;
 
+
 static void maybeInitializeGlobals() {
-    if (empty_dict.ptr()) {
+    // globals that depend on the python dim library,
+    // which we can't lookup until we finish initializing the _C module
+    if (_Tensor.ptr()) {
         return;
     }
-    auto torch = py::import("torch");
     auto dim = py::import("dim");
-    empty_dict = PyDict_New();
+    _Tensor = dim.attr("_Tensor");
+    pointwise = dim.attr("pointwise");
+    _Tensor_sum = _Tensor.attr("sum");
+}
+
+PyObject* Tensor_getitem(PyObject* self, PyObject* index);
+int Tensor_setitem(PyObject* self, PyObject* index, PyObject* value);
+
+void replaceMappingIfMatches(py::handle tp) {
+    auto T = (PyTypeObject*) tp.ptr();
+    bool recurse = false;
+    if (T->tp_as_mapping->mp_subscript == THPVariable_getitem) {
+        T->tp_as_mapping->mp_subscript = Tensor_getitem;
+        recurse = true;
+    }
+    if (T->tp_as_mapping->mp_ass_subscript == THPVariable_setitem) {
+        T->tp_as_mapping->mp_ass_subscript = Tensor_setitem;
+        recurse = true;
+    }
+    if (recurse) {
+        auto result = tp.attr("__subclasses__").call();
+        py::list_view lv(result);
+        for (auto i : lv.enumerate()) {
+            replaceMappingIfMatches(lv[i]);
+        }
+    }
+}
+
+static void initializeGlobals(Arena & A) {
+    auto torch = py::import("torch");
     torch_Tensor = (PyTypeObject*) torch.attr("Tensor").ptr();
     torch_Tensor___mul__ = torch.attr("Tensor").attr("__mul__");
-    _Tensor = dim.attr("_Tensor");
-    NamedTuple = py::import("typing").attr("NamedTuple");
-    pointwise = dim.attr("pointwise");
+
     torch_Tensor_expand = torch.attr("_C").attr("_TensorBase").attr("expand");
     torch_Tensor_split = torch.attr("_C").attr("_TensorBase").attr("split");
     torch_Tensor_copy_ = torch.attr("Tensor").attr("copy_");
-    auto TensorBase = (PyTypeObject*) torch.attr("_C").attr("_TensorBase").ptr();
+    auto py_TensorBase = torch.attr("_C").attr("_TensorBase");
+    auto TensorBase = (PyTypeObject*) py_TensorBase.ptr();
     THPVariable_getitem = TensorBase->tp_as_mapping->mp_subscript;
     THPVariable_setitem = TensorBase->tp_as_mapping->mp_ass_subscript;
-
+    NamedTuple = py::import("typing").attr("NamedTuple");
     no_slice = PySlice_New(NULL, NULL, NULL);
-    _Tensor_sum = _Tensor.attr("sum");
+
+    replaceMappingIfMatches(py_TensorBase);
 }
 
 py::handle DimensionBindError_;
@@ -1960,14 +1991,23 @@ struct IndexingInfo {
     bool has_device;
 };
 
+static Slice<py::handle> as_slice(py::tuple_view tv) {
+    PyObject** begin = &PyTuple_GET_ITEM(tv.ptr(),0);
+    return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+}
+
+static Slice<py::handle> as_slice(py::list_view tv) {
+    PyObject** begin = &PyList_GET_ITEM(tv.ptr(),0);
+    return Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+}
+
 
 bool maybe_dimpack(Slice<py::handle>& elements, py::handle s, bool check_first=true) {
     // can we avoid rechecking?
     if (py::list_view::check(s)) {
         py::list_view tv(s);
         if (!check_first || (tv.size() && Dim::check_exact(tv[0]))) {
-            PyObject** begin = &PyList_GET_ITEM(s.ptr(),0);
-            elements = Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+            elements = as_slice(tv);
             return true;
         }
     }
@@ -1975,8 +2015,7 @@ bool maybe_dimpack(Slice<py::handle>& elements, py::handle s, bool check_first=t
     if (py::tuple_view::check(s)) {
         py::tuple_view tv(s);
         if (!check_first || (tv.size() && Dim::check_exact(tv[0]))) {
-            PyObject** begin = &PyTuple_GET_ITEM(s.ptr(),0);
-            elements = Slice<py::handle>((py::handle*)begin, (py::handle*) (begin + tv.size()));
+            elements = as_slice(tv);
             return true;
         }
     }
@@ -2101,26 +2140,69 @@ static py::object index(Arena& A, py::handle self, py::handle dims, py::handle i
     return invoke_getitem(A, info);
 }
 
-static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, bool tensors_have_dims) {
-    bool is_tuple = py::tuple_view::check(index);
-    bool is_list = py::list_view::check(index);
+// true -- the indices were flattend out of a tuple, list or sequence...
 
+Slice<py::handle> slice_from_sequence(Arena& A, py::handle value) {
+    if (py::tuple_view::check(value)) {
+        return as_slice(py::tuple_view(value));
+    } else if (py::list_view::check(value)) {
+        return as_slice(py::list_view(value));
+    } else {
+        py::sequence_view sv(value);
+        Slice<py::handle> r;
+        for (auto i : sv.enumerate()) {
+            r.append(A, A.autorelease(sv[i]));
+        }
+        return r;
+    }
+}
+
+bool extractIndices(Arena& A, py::handle index, Slice<py::handle>& indices) {
+    if (py::tuple_view::check(index)) {
+        indices.extend(A, as_slice(py::tuple_view(index)));
+        return true;
+    } else if (THPVariable_Check(index.ptr())) {
+        indices.append(A, index);
+        return false;
+    } else if (!py::is_sequence(index)) {
+        indices.append(A, index);
+        return false;
+    }
+    // a copy of treatSequenceAsTuple modified to add Dim and our wrapped tensors..
+    py::sequence_view sv(index);
+    if (sv.size() >= 32) {
+        indices.extend(A, slice_from_sequence(A, index));
+        return true;
+    }
+    for (auto i : sv.enumerate()) {
+        py::handle item;
+        try {
+            item = sv[i];
+        } catch (py::exception_set & e) {
+            PyErr_Clear();
+            indices.append(A, index);
+            return false;
+        }
+        if (THPVariable_Check(item.ptr()) || py::is_sequence(item) || PySlice_Check(item.ptr()) || item.ptr() == Py_Ellipsis || py::is_none(item) || has_dims(item)) {
+            indices.extend(A, slice_from_sequence(A, index));
+            return true;
+        }
+    }
+    indices.append(A, index);
+    return false;
+}
+
+static IndexingInfo getsetitem(Arena & A, py::handle self, py::handle index, bool tensors_have_dims) {
     bool can_call_original_getitem = !tensors_have_dims;
 
-    // nothing about first class dims here, fallback to getitem
-    if (can_call_original_getitem && !is_tuple && !is_list && !has_dims(index)) {
-        return { true };
-    }
-
-    // regularize single index vs tuple of indices
-
     Slice<py::handle> input;
-    if (!is_tuple) {
+    if (has_dims(index)) {
         input.append(A, index);
     } else {
-        py::tuple_view tv(index);
-        for (auto i : tv.enumerate()) {
-            input.append(A, tv[i]);
+        bool is_sequence = extractIndices(A, index, input);
+        // nothing about first class dims here, fallback to getitem
+        if (can_call_original_getitem && !is_sequence) {
+            return { true };
         }
     }
 
@@ -2462,6 +2544,14 @@ static py::object __getitem__(Arena & A, py::handle self, py::handle index) {
     return invoke_getitem(A, iinfo);
 }
 
+
+PyObject* Tensor_getitem(PyObject* self, PyObject* index) {
+    Arena A;
+    PY_BEGIN
+    return __getitem__(A, self, index).release();
+    PY_END(nullptr);
+}
+
 static void __setitem__(Arena & A, py::handle self, py::handle index, py::handle rhs) {
     maybeInitializeGlobals();
     auto iinfo = getsetitem(A, self, index, has_dims(self) || has_dims(rhs));
@@ -2469,6 +2559,7 @@ static void __setitem__(Arena & A, py::handle self, py::handle index, py::handle
         if (-1 == THPVariable_setitem(self.ptr(), index.ptr(), rhs.ptr())) {
             throw py::exception_set();
         }
+        return;
     }
 
     auto rhs_info = TensorInfo::create(A, rhs, false, false);
@@ -2496,6 +2587,15 @@ static void __setitem__(Arena & A, py::handle self, py::handle index, py::handle
     } else {
         torch_Tensor_copy_.call(self, rhs);
     }
+}
+
+
+int Tensor_setitem(PyObject* self, PyObject* index, PyObject* value) {
+    Arena A;
+    PY_BEGIN
+    __setitem__(A, self, index, value);
+    return 0;
+    PY_END(-1);
 }
 
 static PyObject* py___getitem__(PyObject *_,
@@ -2989,6 +3089,7 @@ static struct PyModuleDef module_def = {
 };
 
 PyMODINIT_FUNC PyInit__C(void) {
+    Arena A;
     try {
         py::object mod = py::object::checked_steal(PyModule_Create(&module_def));
         Dim::ready(mod, "Dim");
@@ -2997,6 +3098,9 @@ PyMODINIT_FUNC PyInit__C(void) {
         WrappedOperator::ready(mod, "_WrappedOperator");
         Py_INCREF(&PyInstanceMethod_Type);
         PyModule_AddObject(mod.ptr(), "_instancemethod", (PyObject *)&PyInstanceMethod_Type);
+
+        empty_dict = PyDict_New();
+        initializeGlobals(A);
         return mod.release();
     } catch(py::exception_set& err) {
         return nullptr;

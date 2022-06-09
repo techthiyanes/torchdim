@@ -432,7 +432,7 @@ class TestMin(TestCase):
     def test_softmax_split(self):
         a = torch.rand(16)
         g, i = dims(2)
-        a2 = a[[i,g]]
+        a2 = a[[i,g],]
 
         m_b, _ = a2.max(i)
         f_b = torch.exp(a2 - m_b)
@@ -463,6 +463,24 @@ class TestMin(TestCase):
         C = torch.rand(3, 4, 5)
         ik = dims()
         assert torch.allclose(C.index((0,2), ik).positional(ik), C.permute(0,2,1).reshape(15,4))
+
+    # failures that came up from monkey patching some operators...
+    def test_monkey(self):
+        A = torch.rand(3, 4)
+        A[0, 0] = 5
+        x = torch.randn(3, 4, 4, 4, 3)
+        x_clone1 = x.clone()
+        ia = torch.tensor([0, 2, 1])
+        ib = torch.tensor([0, 2, 1])
+        first_shape = x[:, ia, None, ib, 0].shape
+        print(first_shape)
+        x_clone1[:, ia, None, ib, 0] = torch.randn(first_shape).to(x_clone1)
+        x = torch.autograd.Variable(torch.tensor([]))
+        z = torch.autograd.Variable(torch.IntTensor([1, 2, 3]))
+        a = [z[2], z[0] + 3]
+        print(a)
+        x.new(a)
+        #self.assertEqual(x.new([z[2], z[0] + 3]).tolist(), [3, 4])
 
 def do_stuff(a):
     i = dims()

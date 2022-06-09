@@ -87,10 +87,12 @@ else:
 
 # note: there is no python reference
 t__setitem__ = _C._instancemethod(_C.__setitem__)
+# this is patched in the C API because otherwise torch.Tensor will
+# no longer be considered a sequence and things will break
+# torch.Tensor.__getitem__ = t__getitem__
 
-torch.Tensor.__getitem__ = t__getitem__
 _Tensor.__getitem__ = t__getitem__
-torch.Tensor.__setitem__ = t__setitem__
+#torch.Tensor.__setitem__ = t__setitem__
 _Tensor.__setitem__ = t__setitem__
 
 torch.Tensor.split = split
