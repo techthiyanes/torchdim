@@ -1,5 +1,4 @@
 import torch
-from .batch_tensor import _enable_layers
 from typing import Union, Sequence
 import inspect
 import dis

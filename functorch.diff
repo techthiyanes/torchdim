@@ -1,14 +1,8 @@
-commit d7b989338663e7896299f49565869adc8d743ff3
-Author: Zachary DeVito <zdevito@fb.com>
-Date:   Thu May 5 12:49:46 2022 -0700
-
-    API functions to inject custom vmap levels onto dispatch stack
-
 diff --git a/functorch/csrc/DynamicLayer.cpp b/functorch/csrc/DynamicLayer.cpp
-index 3b8894c..85029fc 100644
+index 42bfece..023e542 100644
 --- a/functorch/csrc/DynamicLayer.cpp
 +++ b/functorch/csrc/DynamicLayer.cpp
-@@ -193,11 +193,9 @@ static DynamicLayer popDynamicLayer() {
+@@ -213,11 +213,9 @@ static DynamicLayer popDynamicLayer() {
  
  static int64_t pushDynamicLayer(DynamicLayer&& dynamic_layer) {
    auto& dynamicLayerStack = dynamicLayerStackAccessor();
@@ -21,7 +15,7 @@ index 3b8894c..85029fc 100644
      setDynamicLayerFrontBackKeysIncluded(true);
  #ifdef HAS_TORCH_SHOW_DISPATCH_TRACE
      if (c10::show_dispatch_trace_enabled()) {
-@@ -206,7 +204,7 @@ static int64_t pushDynamicLayer(DynamicLayer&& dynamic_layer) {
+@@ -226,7 +224,7 @@ static int64_t pushDynamicLayer(DynamicLayer&& dynamic_layer) {
  #endif
    }
  
@@ -30,7 +24,7 @@ index 3b8894c..85029fc 100644
  }
  
  int64_t initAndPushDynamicLayer(
-@@ -215,12 +213,12 @@ int64_t initAndPushDynamicLayer(
+@@ -235,12 +233,12 @@ int64_t initAndPushDynamicLayer(
      optional<RandomnessType> randomness,
      optional<bool> prev_grad_mode,
      optional<bool> prev_fwd_grad_mode,
@@ -47,7 +41,7 @@ index 3b8894c..85029fc 100644
  
    TORCH_INTERNAL_ASSERT(data.find(layerId) == data.end());
 diff --git a/functorch/csrc/DynamicLayer.h b/functorch/csrc/DynamicLayer.h
-index cf84311..ba1fa71 100644
+index fe91298..381875e 100644
 --- a/functorch/csrc/DynamicLayer.h
 +++ b/functorch/csrc/DynamicLayer.h
 @@ -57,7 +57,8 @@ FUNCTORCH_API int64_t initAndPushDynamicLayer(
@@ -61,7 +55,7 @@ index cf84311..ba1fa71 100644
  FUNCTORCH_API c10::optional<DynamicLayer> maybeCurrentDynamicLayer();
  FUNCTORCH_API const std::vector<DynamicLayer>& getDynamicLayerStack();
 diff --git a/functorch/csrc/init.cpp b/functorch/csrc/init.cpp
-index 35ce5f3..6b0d32d 100644
+index b0699ce..250c0c3 100644
 --- a/functorch/csrc/init.cpp
 +++ b/functorch/csrc/init.cpp
 @@ -239,6 +239,18 @@ int64_t _vmap_increment_nesting(int64_t batch_size, const std::string& randomnes
@@ -83,6 +77,15 @@ index 35ce5f3..6b0d32d 100644
  int64_t _vmap_decrement_nesting() {
    auto layer = popDynamicLayerAndDeleteMetadata();
    TORCH_INTERNAL_ASSERT(layer.key() == TransformType::Vmap);
+@@ -358,7 +370,7 @@ static void dump_local_tls() {
+ 
+ 
+ namespace at { namespace functorch {
+-
++#if 0
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("_add_batch_dim", &at::functorch::_add_batch_dim, "add batch dim");
+   m.def("_remove_batch_dim", &at::functorch::_remove_batch_dim, "remove batch dim");
 @@ -367,6 +379,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
    m.def("_propagate_functional_input_mutation", &at::functorch::_propagate_functional_input_mutation, "propagate functional input mutations");
    m.def("_unwrap_functional_tensor", &at::functorch::_unwrap_functional_tensor, "remove functional tensor");
@@ -93,3 +96,10 @@ index 35ce5f3..6b0d32d 100644
    m.def("_vmap_decrement_nesting", &at::functorch::_vmap_decrement_nesting, "remove batch dim");
    m.def("_func_increment_nesting", &at::functorch::_func_increment_nesting, "functionalization start");
    m.def("_func_decrement_nesting", &at::functorch::_func_decrement_nesting, "functionalization end");
+@@ -409,5 +424,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   initDispatchBindings(m.ptr());
+ #endif
+ }
+-
++#endif
+ }}
