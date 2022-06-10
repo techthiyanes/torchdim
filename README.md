@@ -22,6 +22,28 @@ The tensor input to a resnet might have the shape [8, 3, 224, 224] but informall
 
  Instead of treating this concept informally, first-class dimensions introduce a Python object, a `Dim`, to represent the concept. By expanding the semantics of tensors with dim objects, we can get behavior equivalent to batching transforms (xmap, vmap), einops-style rearragement, and loop-style tensor indexing.
 
+ Installation
+ ============
+We have to install a nightly build of PyTorch so first set up an environment:
+
+    conda create --name dim
+    conda activate dim
+
+First-class dims requires a fairly recent nightly build of PyTorch so that functorch will work. You can install it using one of these commands:
+
+    # For CUDA 10.2
+    pip install --pre torch -f https://download.pytorch.org/whl/nightly/cu102/torch_nightly.html --upgrade
+    # For CUDA 11.3
+    pip install --pre torch -f https://download.pytorch.org/whl/nightly/cu113/torch_nightly.html --upgrade
+    # For CPU-only build
+    pip install --pre torch -f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html --upgrade
+
+Install dim. You will be asked for github credentials to access the fairinternal organization.
+
+    pip install ninja  # Makes the build go faster
+    pip install --user "git+https://github.com/fairinternal/dynamic_torchscript_experiments#egg=dim&subdirectory=dim"
+
+
 Creating and Binding Dims
 =========================
 
@@ -75,7 +97,7 @@ i.size = 5 # ok, i previously did not have a size
 
 i.size = 5 # ok, it already had the size 5
 try:
-    i.size = 3 
+    i.size = 3
 except:
     # error! already set to size 3
     pass
@@ -223,13 +245,28 @@ def attention(K, Q, V):
 
 einops
 ------
+[einops tutorial](http://einops.rocks/pytorch-examples.html)
 
 ```{code-cell} ipython3
+from einops import rearrange
+def pixel_shuffle_einops(img, upscale_factor=2):
+    return rearrange(img, 'b (c h2 w2) h w -> b c (h h2) (w w2)', h2=upscale_factor, w2=upscale_factor)
+
 def pixel_shuffle(img, upscale_factor=2):
-    b, h2, w2, h, w = dims()
-    h2.size = w2.size = upscale_factor
-    return img[b, (h2, w2), h, w].positional(b, (h, h2), (w, w2))
+    h2, w2, c, b, h, w = dims(upscale_factor, upscale_factor)
+    return img[b, (c, h2, w2), h, w].positional(b, c, (h, h2), (w, w2))
+
 ```
+
+
+Restyling Gram matrix for style transfer
+```{code-cell} ipython3
+def gram_matrix_new_einops(y):
+    b, ch, h, w = y.shape
+    return torch.einsum('bchw,bdhw->bcd', [y, y]) / (h * w)
+
+```
+
 
 vmap, xmap
 ----------
@@ -257,7 +294,7 @@ mult-headed attension
 ---------------------
 
 ```{code-cell} ipython3
-def multiheadattention(q, k, v, num_attention_heads, dropout_prob):
+def multiheadattention(q, k, v, num_attention_heads, dropout_prob, use_positional_embedding):
     batch, query_sequence, key_sequence, heads, features = dims()
     heads.size = num_attention_heads
 
@@ -268,14 +305,14 @@ def multiheadattention(q, k, v, num_attention_heads, dropout_prob):
 
     # einsum-style operators to calculate scores
     attention_scores = (q*k).sum(features) * (features.size ** -0.5)
-    
+
     # use first-class dim to specify dimension for softmax
     attention_probs = softmax(attention_scores, dim=key_sequence)
-    
+
     # dropout work pointwise, following Rule #1
     attention_probs = torch.nn.functional.dropout(attention_probs, p=dropout_prob)
 
-    
+
     context_layer = (attention_probs*v).sum(key_sequence)
 
     # flatten heads back into features
@@ -284,8 +321,45 @@ def multiheadattention(q, k, v, num_attention_heads, dropout_prob):
 
 indirect indexing
 -----------------
-    embeddings
-    relative positional embeddings
+
+```{code-cell} ipython3
+from torch import where
+def triu(A):
+   i,j = dims()
+   a = A[i, j]
+   return torch.where(i <= j, a, 0).positional(i, j)
+```
+
+```{code-cell} ipython3
+def embedding_bag(input, embedding_weights):
+    batch, sequence = dims()
+    r = embedding_weights[input[batch, sequence], features].sum(sequence)
+    return r.positional(batch, features)
+```
+
+Relative positional embeddings associate an embedding vector with the distance between the query and the key in the sequence.
+For instance, a key two elements after query after key will get embedding ID 2. We can use first-class dimensions to do the indexing arithmetic, and embedding lookup.
+
+```{code-cell} ipython3
+def relative_positional_embedding(q, k, distance_embedding_weight):
+    batch, query_sequence, key_sequence, heads, features = dims()
+    q = q[batch, query_sequence, [heads, features]]
+    k = k[batch, key_sequence, [heads, features]]
+
+    distance = query_sequence - key_sequence
+    n_embeddings = distance_embedding_weight.size(0)
+    index_bias = n_embeddings // 2
+
+    assert key_sequence.size + bias <= n_embeddings
+
+    positional_embedding = distance_embedding_weight[distance + index_bias, features]
+
+    relative_position_scores_query = (q*positional_embedding).sum(features)
+    relative_position_scores_key = (k*positional_embedding).sum(features)
+    return  (relative_position_scores_query + relative_position_scores_key).positional(batch, heads, key_sequence, query_sequence)
+```
+
+
     upper triangular
 
 +++
@@ -301,7 +375,7 @@ However, the difficulty of many of the puzzlers lies not in how to compute the a
 
 +++
 
-## Puzzle 3 - outer
+### Puzzle 3 - outer
 
 Compute [outer](https://numpy.org/doc/stable/reference/generated/numpy.outer.html) - the outer product of two vectors.
 
@@ -310,13 +384,13 @@ def outer_spec(a, b, out):
     for i in range(len(out)):
         for j in range(len(out[0])):
             out[i][j] = a[i] * b[j]
-            
+
 def outer(a, b):
     i, j = dims()
     return (a[i] * b[j]).positional(i, j)
 ```
 
-## Puzzle 4 - diag
+### Puzzle 4 - diag
 
 Compute [diag](https://numpy.org/doc/stable/reference/generated/numpy.diag.html) - the diagonal vector of a square matrix.
 
@@ -324,14 +398,14 @@ Compute [diag](https://numpy.org/doc/stable/reference/generated/numpy.diag.html)
 def diag_spec(a, out):
     for i in range(len(a)):
         out[i] = a[i][i]
-        
+
 def diag(a):
     # the syntax closely matches the spec
     i = dims()
     return a[i, i].positional(i)
 ```
 
-## Puzzle 5 - eye
+### Puzzle 5 - eye
 
 Compute [eye](https://numpy.org/doc/stable/reference/generated/numpy.eye.html) - the identity matrix.
 
@@ -340,13 +414,13 @@ from torch import where
 def eye_spec(out):
     for i in range(len(out)):
         out[i][i] = 1
-        
+
 def eye(j: int):
     i,j = dims(j, j)
     return where(i.eq(j), 1, 0).positional(i, j)
 ```
 
-## Puzzle 6 - triu
+### Puzzle 6 - triu
 
 Compute [triu](https://numpy.org/doc/stable/reference/generated/numpy.triu.html) - the upper triangular matrix.
 
@@ -358,13 +432,13 @@ def triu_spec(out):
                 out[i][j] = 1
             else:
                 out[i][j] = 0
-                
+
 def triu(j: int):
     i,j = dims(j, j)
     return where(i <= j, 1, 0).positional(i, j)
 ```
 
-## Puzzle 8 - diff
+### Puzzle 8 - diff
 
 Compute [diff](https://numpy.org/doc/stable/reference/generated/numpy.diff.html) - the running difference.
 
@@ -379,7 +453,7 @@ def diff(a, i: int):
     return where(i - 1 >= 0, d, a[i]).positional(i)
 ```
 
-## Puzzle 9 - vstack
+### Puzzle 9 - vstack
 
 Compute [vstack](https://numpy.org/doc/stable/reference/generated/numpy.vstack.html) - the matrix of two vectors
 
@@ -394,7 +468,7 @@ def vstack(a, b):
     return where(v.eq(0),  a[i], b[i]).positional(v, i)
 ```
 
-## Puzzle 10 - roll
+### Puzzle 10 - roll
 
 Compute [roll](https://numpy.org/doc/stable/reference/generated/numpy.roll.html) - the vector shifted 1 circular position.
 
@@ -405,13 +479,13 @@ def roll_spec(a, out):
             out[i] = a[i + 1]
         else:
             out[i] = a[i + 1 - len(out)]
-            
+
 def roll(a, i: int):
     i = dims(a.size(0))
     return a[where(i + 1 < i.size, i + 1, 0)].positional(i)
 ```
 
-## Puzzle 11 - flip
+### Puzzle 11 - flip
 
 Compute [flip](https://numpy.org/doc/stable/reference/generated/numpy.flip.html) - the reversed vector
 
@@ -419,13 +493,13 @@ Compute [flip](https://numpy.org/doc/stable/reference/generated/numpy.flip.html)
 def flip_spec(a, out):
     for i in range(len(out)):
         out[i] = a[len(out) - i - 1]
-        
+
 def flip(a, i: int):
     i = dims(a.size(0))
     return a[i.size - i - 1].positional(i)
 ```
 
-## Puzzle 14 - sequence_mask
+### Puzzle 14 - sequence_mask
 
 
 Compute [sequence_mask](https://www.tensorflow.org/api_docs/python/tf/sequence_mask) - pad out to length per batch.
@@ -438,7 +512,7 @@ def sequence_mask_spec(values, length, out):
                 out[i][j] = values[i][j]
             else:
                 out[i][j] = 0
-    
+
 def sequence_mask(values, length):
     j, i = dims()
     v = values[i, j]
