@@ -37,11 +37,9 @@ class _Tensor:
 
     if use_c:
         __torch_function__ = classmethod(_C.__torch_function__)
-        positional = _C._instancemethod(_C.positional)
         expand = _C._instancemethod(_C.expand)
     else:
         __torch_function__ = reference.__torch_function__
-        positional = reference.positional
         expand = reference.expand
 
     index = _C._instancemethod(_C.index)
@@ -100,6 +98,11 @@ torch.Tensor.expand = _C._instancemethod(_C.expand)
 torch.Tensor.index = _C._instancemethod(_C.index)
 wrap_type(use_c, _Tensor, torch.Tensor, _Tensor.__torch_function__)
 del _Tensor.ndim
+
+if use_c:
+    _Tensor.positional = _C._instancemethod(_C.positional)
+else:
+    _Tensor.positional = reference.positional
 
 _def('mean')
 _def('sum')

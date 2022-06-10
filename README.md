@@ -16,7 +16,7 @@ kernelspec:
 First-class Dimensions
 ======================
 
-_The functionality of einops (einsum, rearrange), batching (vmap, xmap), and tensor indexing with one new concept_
+_The functionality of [einops](http://einops.rocks) (einsum, rearrange), batching ([vmap](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap), [xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html)), and tensor indexing with one new concept_
 
 The tensor input to a resnet might have the shape [8, 3, 224, 224] but informally we think of those dimensions as 'batch', 'channel', 'width', and 'height'. Eventhough 'width' and 'height' have the same _size_ we still think of them as separate dimensions, and if we have two _different_ images, we think of both as sharing the _same_ 'channel' dimension.
 
@@ -47,7 +47,7 @@ Install dim. You will be asked for github credentials to access the fairinternal
 Creating and Binding Dims
 =========================
 
-Python objects that represent dimension are created using the `dims` operator[^1].
+Python objects that represent dimension are created using the `dims` operator.[^1]
 
 ```{code-cell} ipython3
 import torch
@@ -254,7 +254,7 @@ def pixel_shuffle_einops(img, upscale_factor=2):
 
 def pixel_shuffle(img, upscale_factor=2):
     h2, w2, c, b, h, w = dims(upscale_factor, upscale_factor)
-    return img[b, (c, h2, w2), h, w].positional(b, c, (h, h2), (w, w2))
+    return img[b, (c, h2, w2), h, w]
 
 ```
 
@@ -519,8 +519,32 @@ def sequence_mask(values, length):
     return where(j < length[i], v, 0).positional(i, j)
 ```
 
-Advantages of First-class Dimensions over Strings
-=================================================
+Advantages of First-class Dimensions over Named (string) Dimensions
+===================================================================
+
+The most prominent difference between first-class dimensions and alternatives such as einops, named tensors, or xmap is that dimensions are objects rather than strings. Using objects has a number of nice properties.
+
+### Avoiding naming conflicts
+
+Using strings for dimensions introduces the possibility that two unrelated dimensions are given the same name. Using objects instead makes it clear the same names are not the same dimension. For instance, we defined `bmm` by batching a call to
+to `mm`, and even though they both use the name `i` to identify a dimension.  Because each `i` is a different object, there is no naming conflict:
+
+
+```{code-cell} ipython3
+def mm(A, B):
+    i, j, k = dims()
+    r = (A[i, k] * B[k, j]).sum(k)
+    return r.positional(i, j)
+
+def bmm(A, B):
+    i = dims() # note: doesn't matter than mm internally also uses i
+    return mm(A[i], B[i])
+```
+
+Einops avoids conflicts by ensuring names are all introduced and removed in a single expression, but this precludes using long-lived dimensions to present implicit batching similar to xmap. When nested, JAX's xmap seems to consider axes the same if the string name matches. In the above example it would consider the `i` dimension to be the same dimension in both `bmm` and `mm` so the code would error.
+
+
+With string dimensions, we have to be careful not
 
 * einops add new operators and lack rule #1
 * strings for dimensions prevent having rule #3, which then requries additional operators to bind dimensions because it cannot be a property of indexing.
