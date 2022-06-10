@@ -49,22 +49,22 @@ print(input_fc.dims) # first class dimensions
 ```
 
 ```{code-cell} ipython3
-> (batch, channel, width, height)
 print(input_fc.ndim) # positional dimensions
-> 0
+```
 
+```{code-cell} ipython3
 input_mixed = input[batch, :, :, height]
 print(input_mixed.dims)
-> (batch, height)
-print(input_mixed.ndims)
-> 2
+```
+
+```{code-cell} ipython3
+print(input_mixed.ndim)
 ```
 
 Dimensions will take on the size of the first thing they are bound to:
 
 ```{code-cell} ipython3
 print(batch.size)
-> 2
 ```
 
 But you can also directly set the size of dimension:
@@ -74,7 +74,11 @@ i = dims()
 i.size = 5 # ok, i previously did not have a size
 
 i.size = 5 # ok, it already had the size 5
-i.size = 3 # error! already set to size 3
+try:
+    i.size = 3 
+except:
+    # error! already set to size 3
+    pass
 j = dims(4) # can also be set on construction
 ```
 
@@ -104,9 +108,8 @@ Rule 2: Specifying dimensions
 **Wherever an integer is used to specify a dimension in the existing torch operator, a first-class dimensions can be used instead to tell the operator to work over that dimension.**
 
 ```{code-cell} ipython3
-avg_pixel_color = input_fc.mean(width, height)
-print(avg_color.dims)
-> (batch, channel)
+avg_pixel_color = input_fc.mean((width, height))
+print(avg_pixel_color.dims)
 ```
 
 Any other ther first-class dimensions (e.g. batch, channel) are still implicitly batched according to Rule #1.
@@ -117,10 +120,10 @@ Rule 3: Dims are Tensors
 
 ```{code-cell} ipython3
 print(channel.dims)
-> (channel, )
+```
+
+```{code-cell} ipython3
 print(channel + 1000)
-> tensor([1000, 1001, 1002])
-> with dims=(channel,) torch.Size([3])
 ```
 
 This means that a dimensions used as a tensor acts as an index into that dimension. Going back to our loop-level analogy, it is analogous to using the loop variable as a value:
@@ -138,7 +141,6 @@ words = torch.tensor([5, 4, 0,])
 
 state = embeddings[words[sequence], features]
 print(state.dims)
-> (sequence, features)
 ```
 
 With the following analogy to loops:
@@ -174,10 +176,11 @@ j.size = 2
 A = torch.rand(6, 4)
 a = A[(i, j), k] # split dim 0 into i,j
 print(i.size, j.size, k.size)
-> 3, 2, 4
+```
+
+```{code-cell} ipython3
 r = a.positional(i, (j, k)) # flatten j and k
 print(r.shape)
-> [3, 8]
 ```
 
 The size of one unsized dimension in a tuple such as `i` can be inferred if the other sizes are known.
@@ -185,24 +188,47 @@ The size of one unsized dimension in a tuple such as `i` can be inferred if the 
 Examples
 ========
 
-einsum
+einsum-style products
 ------
 
 ```{code-cell} ipython3
-# matmul
+def mm(A, B):
+    i, j, k = dims()
+    r = (A[i, k] * B[k, j]).sum(k)
+    return r.positional(i, j)
+```
 
-#batch matmul # note how the concepts compose
+```{code-cell} ipython3
+def bmm(A, B):
+    b, i, j, k = dims()
+    r = (A[b, i, k] * B[b, k, j]).sum(k)
+    return r.positional(b, i, j)
+```
 
-#attention
+```{code-cell} ipython3
+def bmm_2(A, B):
+    i = dims() # note: doesn't matter than mm internally also uses i
+    return mm(A[i], B[i])
+```
 
-#outer products
+```{code-cell} ipython3
+from dim import softmax
+def attention(K, Q, V):
+    batch, channel, key, query = dims()
+    A = (K[batch, channel, key]*Q[batch, channel, query]).sum(channel)
+    A = softmax(A * (channel.size ** -0.5), dim=key)
+    R = (V[batch, channel, key] * A).sum(key)
+    return torch.cat((R.positional(batch, channel, query), Q), dim=1)
 ```
 
 einops
 ------
 
 ```{code-cell} ipython3
-pixels shuffle
+def pixel_shuffle(img, upscale_factor=2):
+    b, h2, w2, h, w = dims()
+    h2.size = w2.size = upscale_factor
+    return img[b, (h2, w2), h, w].positional(b, (h, h2), (w, w2))
 ```
 
 vmap, xmap
@@ -210,25 +236,62 @@ vmap, xmap
 
 Rule #1 means that is easy to implicitly batch things. The way of specifying how to batch has lighter weight syntax as well.
 
-note the awkward mapping/unmapping apis
+```{code-cell} ipython3
+batch_size, feature_size = 3, 5
+weights = torch.randn(feature_size)
 
+def model(feature_vec):
+    # Very simple linear model with activation
+    assert feature_vec.dim() == 1
+    return feature_vec.dot(weights).relu()
 
-indirect indexing
------------------
+examples = torch.randn(batch_size, feature_size)
+batch = dims()
+model(examples[batch])
+```
 
-    embeddings
-    relative positional embeddings
-    upper triangular
+note the awkward mapping/unmapping apis in xmap
+
 
 mult-headed attension
 ---------------------
 
-Flatten/Unflatten the heads
-einsums of the attension products
-indirect indexing of the embeddings
+```{code-cell} ipython3
+def multiheadattention(q, k, v, num_attention_heads, dropout_prob):
+    batch, query_sequence, key_sequence, heads, features = dims()
+    heads.size = num_attention_heads
+
+    # binding dimensions, and unflattening the heads from the feature dimension
+    q = q[batch, query_sequence, [heads, features]]
+    k = k[batch, key_sequence, [heads, features]]
+    v = v[batch, key_sequence, [heads, features]]
+
+    # einsum-style operators to calculate scores
+    attention_scores = (q*k).sum(features) * (features.size ** -0.5)
+    
+    # use first-class dim to specify dimension for softmax
+    attention_probs = softmax(attention_scores, dim=key_sequence)
+    
+    # dropout work pointwise, following Rule #1
+    attention_probs = torch.nn.functional.dropout(attention_probs, p=dropout_prob)
+
+    
+    context_layer = (attention_probs*v).sum(key_sequence)
+
+    # flatten heads back into features
+    return context_layer.positional(batch, query_sequence, [heads, features])
+```
+
+indirect indexing
+-----------------
+    embeddings
+    relative positional embeddings
+    upper triangular
+
++++
 
 tensor puzzlers
----------------
+============
 
 [Tensor Puzzlers](https://github.com/srush/Tensor-Puzzles) are a good excersize for learning the numpy and torch APIs by figuring out how to define common operations using a small set of primitive tensor operations.
 
@@ -236,16 +299,150 @@ However, the difficulty of many of the puzzlers lies not in how to compute the a
 
 **With first class dimensions, these puzzlers are nearly the same as the spec that defines them**
 
++++
+
+## Puzzle 3 - outer
+
+Compute [outer](https://numpy.org/doc/stable/reference/generated/numpy.outer.html) - the outer product of two vectors.
+
 ```{code-cell} ipython3
-    outer
-    diag
-    eye
-    triu
-    diff
-    vstack
-    roll
-    flip
-    sequence_mask
+def outer_spec(a, b, out):
+    for i in range(len(out)):
+        for j in range(len(out[0])):
+            out[i][j] = a[i] * b[j]
+            
+def outer(a, b):
+    i, j = dims()
+    return (a[i] * b[j]).positional(i, j)
+```
+
+## Puzzle 4 - diag
+
+Compute [diag](https://numpy.org/doc/stable/reference/generated/numpy.diag.html) - the diagonal vector of a square matrix.
+
+```{code-cell} ipython3
+def diag_spec(a, out):
+    for i in range(len(a)):
+        out[i] = a[i][i]
+        
+def diag(a):
+    # the syntax closely matches the spec
+    i = dims()
+    return a[i, i].positional(i)
+```
+
+## Puzzle 5 - eye
+
+Compute [eye](https://numpy.org/doc/stable/reference/generated/numpy.eye.html) - the identity matrix.
+
+```{code-cell} ipython3
+from torch import where
+def eye_spec(out):
+    for i in range(len(out)):
+        out[i][i] = 1
+        
+def eye(j: int):
+    i,j = dims(j, j)
+    return where(i.eq(j), 1, 0).positional(i, j)
+```
+
+## Puzzle 6 - triu
+
+Compute [triu](https://numpy.org/doc/stable/reference/generated/numpy.triu.html) - the upper triangular matrix.
+
+```{code-cell} ipython3
+def triu_spec(out):
+    for i in range(len(out)):
+        for j in range(len(out)):
+            if i <= j:
+                out[i][j] = 1
+            else:
+                out[i][j] = 0
+                
+def triu(j: int):
+    i,j = dims(j, j)
+    return where(i <= j, 1, 0).positional(i, j)
+```
+
+## Puzzle 8 - diff
+
+Compute [diff](https://numpy.org/doc/stable/reference/generated/numpy.diff.html) - the running difference.
+
+```{code-cell} ipython3
+def diff_spec(a, out):
+    out[0] = a[0]
+    for i in range(1, len(out)):
+        out[i] = a[i] - a[i - 1]
+def diff(a, i: int):
+    i = dims()
+    d = a[i] - a[i - 1]
+    return where(i - 1 >= 0, d, a[i]).positional(i)
+```
+
+## Puzzle 9 - vstack
+
+Compute [vstack](https://numpy.org/doc/stable/reference/generated/numpy.vstack.html) - the matrix of two vectors
+
+```{code-cell} ipython3
+def vstack_spec(a, b, out):
+    for i in range(len(out[0])):
+        out[0][i] = a[i]
+        out[1][i] = b[i]
+
+def vstack(a, b):
+    v, i = dims(2)
+    return where(v.eq(0),  a[i], b[i]).positional(v, i)
+```
+
+## Puzzle 10 - roll
+
+Compute [roll](https://numpy.org/doc/stable/reference/generated/numpy.roll.html) - the vector shifted 1 circular position.
+
+```{code-cell} ipython3
+def roll_spec(a, out):
+    for i in range(len(out)):
+        if i + 1 < len(out):
+            out[i] = a[i + 1]
+        else:
+            out[i] = a[i + 1 - len(out)]
+            
+def roll(a, i: int):
+    i = dims(a.size(0))
+    return a[where(i + 1 < i.size, i + 1, 0)].positional(i)
+```
+
+## Puzzle 11 - flip
+
+Compute [flip](https://numpy.org/doc/stable/reference/generated/numpy.flip.html) - the reversed vector
+
+```{code-cell} ipython3
+def flip_spec(a, out):
+    for i in range(len(out)):
+        out[i] = a[len(out) - i - 1]
+        
+def flip(a, i: int):
+    i = dims(a.size(0))
+    return a[i.size - i - 1].positional(i)
+```
+
+## Puzzle 14 - sequence_mask
+
+
+Compute [sequence_mask](https://www.tensorflow.org/api_docs/python/tf/sequence_mask) - pad out to length per batch.
+
+```{code-cell} ipython3
+def sequence_mask_spec(values, length, out):
+    for i in range(len(out)):
+        for j in range(len(out[0])):
+            if j < length[i]:
+                out[i][j] = values[i][j]
+            else:
+                out[i][j] = 0
+    
+def sequence_mask(values, length):
+    j, i = dims()
+    v = values[i, j]
+    return where(j < length[i], v, 0).positional(i, j)
 ```
 
 Advantages of First-class Dimensions over Strings

@@ -47,8 +47,8 @@ class _Tensor:
     index = _C._instancemethod(_C.index)
 
     def __repr__(self):
-        tensor, levels = self._tensor, self._levels
-        return f'{tensor}\nwith dims={levels} {tensor.size()}'
+        tensor, levels, ndim = self._tensor, self._levels, self.ndim
+        return f'{tensor}\nwith dims={tuple(l + ndim if isinstance(l, int) else l for l in levels)} sizes={tuple(tensor.size())}'
 
 
 TensorLike = (_Tensor, torch.Tensor)
