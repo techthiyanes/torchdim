@@ -1,4 +1,4 @@
----
+<!-- ---
 jupytext:
   cell_metadata_filter: -all
   formats: md:myst
@@ -11,7 +11,7 @@ kernelspec:
   display_name: Python 3 (ipykernel)
   language: python
   name: python3
----
+--- -->
 
 First-class Dimensions
 ======================
