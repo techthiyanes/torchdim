@@ -482,9 +482,16 @@ class TestMin(TestCase):
         x.new(a)
         #self.assertEqual(x.new([z[2], z[0] + 3]).tolist(), [3, 4])
 
-def do_stuff(a):
-    i = dims()
-    i.size = 4
+    def test_index_placement(self):
+        A = torch.rand(1, 2, 3, 4)
+
+        i, j = dims(2,4)
+
+        a = A[:, i+0, :, j+0]
+        r = a.positional(i, j)
+
+        assert torch.allclose(A.permute(1, 3, 0, 2), r)
+
 
 if __name__ == '__main__':
     main()

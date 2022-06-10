@@ -880,12 +880,15 @@ static PyObject* py_Tensor_from_batched(PyObject *self,
 py::object Tensor::from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
     size_t seen_dims = 0;
     int last = 0;
-    for (auto l : levels) {
+    //auto sz = tensor.sizes();
+    for (auto i : levels.enumerate()) {
+        auto l = levels[i];
         if (l.is_positional()) {
             AT_ASSERT(last == 0 || last + 1 == l.position());
             last = l.position();
         } else {
             py::object::borrow(l.dim()).release();
+            //AT_ASSERT(sz[i] == l.dim()->size());
             ++seen_dims;
         }
     }
@@ -2440,13 +2443,18 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
     Slice<DimEntry> index_levels;
     int64_t tensor_insert_point = -1;
     bool requires_getindex = false;
+    auto mark_tensor_index = [&] {
+        if (tensor_insert_point == -1) {
+            tensor_insert_point = result_levels.size();
+        } else if (tensor_insert_point != result_levels.size()) {
+            tensor_insert_point = 0;
+        }
+    };
     for (auto i : flat_inputs.enumerate()) {
         auto inp = flat_inputs[i];
          if(tensor_inputs[i]) {
              requires_getindex = true;
-             if (tensor_insert_point == -1) {
-                 tensor_insert_point = result_levels.size();
-             }
+             mark_tensor_index();
              for (auto l : tensor_inputs[i].levels) {
                  // std::cout << "Consider to add " << l << "\n";
                  if (!index_levels.contains(l)) {
@@ -2466,9 +2474,7 @@ IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> i
                 if (!index_levels.contains(d)) {
                      index_levels.append(A, d);
                 }
-                if (tensor_insert_point == -1) {
-                    tensor_insert_point = result_levels.size();
-                }
+                mark_tensor_index();
             }
          } else {
             if (inp.ptr() != no_slice.ptr()) {
