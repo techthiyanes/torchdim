@@ -1520,7 +1520,11 @@ static PyObject* dims(PyObject *self,
     PyThreadState* state = PyThreadState_GET();
     PyFrameObject* f = state->frame;
     auto code = (_Py_CODEUNIT*)PyBytes_AS_STRING(f->f_code->co_code);
+#if PY_VERSION_HEX >= 0x030a00f0
+    int first = f->f_lasti + 1;
+#else
     int first = f->f_lasti /  2 + 1;
+#endif
     auto unpack = code[first];
     if (relevant_op(unpack)) {
         auto str = getname(f->f_code, unpack);
