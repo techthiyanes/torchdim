@@ -174,23 +174,25 @@ With the following analogy to loops:
             state = embeddings[words[sequence], features]
 
 
-Removing Dims
+Unbinding Dims
 -------------
-The `positional` method converts a first-class dimensions in a tensor back to a normal positional dimensions.
+The `order` method converts first-class dimensions in a tensor back to a normal positional dimensions by specifying an order for those dimensions.[^2]
 
 By specifiying a different order from how things were originally bound, it is easy to do transpositions.
 
 ```{code-cell} ipython3
 i, j = dims()
 A = torch.rand(3, 4)
-A_T = A[i, j].positional(j, i)
+A_T = A[i, j].order(j, i)
 assert torch.allclose(A.T, A_T)
 ```
+
+[^2] `order` is actually just a synonym for the already-existing `permute` method, which takes a list a dimension specifiers and orders the specified dimensions in that order. By Rule #2 implies that first class dims can be passed as arguments to permute, ordering them. However, the name `permute` is confusing in this context since it implies dim objects have an original order, we prefer to use `order` when writing code.
 
 Flattening and Splitting Dims
 -----------------------------
 
-**Tuples of dimensions** can be passed to both indexing and `positional`. In indexing, this will split the dimension being indexed across the dimensions in the tuple.  In `positional` it will flatten the dimensions in a single positional dimension:
+**Tuples of dimensions** can be passed to both indexing and `order`. In indexing, this will split the dimension being indexed across the dimensions in the tuple.  In `order` it will flatten the dimensions in a single positional dimension:
 
 ```{code-cell} ipython3
 i, j, k = dims()
@@ -201,7 +203,7 @@ print(i.size, j.size, k.size)
 ```
 
 ```{code-cell} ipython3
-r = a.positional(i, (j, k)) # flatten j and k
+r = a.order(i, (j, k)) # flatten j and k
 print(r.shape)
 ```
 
@@ -217,14 +219,14 @@ einsum-style products
 def mm(A, B):
     i, j, k = dims()
     r = (A[i, k] * B[k, j]).sum(k)
-    return r.positional(i, j)
+    return r.order(i, j)
 ```
 
 ```{code-cell} ipython3
 def bmm(A, B):
     b, i, j, k = dims()
     r = (A[b, i, k] * B[b, k, j]).sum(k)
-    return r.positional(b, i, j)
+    return r.order(b, i, j)
 ```
 
 ```{code-cell} ipython3
@@ -240,7 +242,7 @@ def attention(K, Q, V):
     A = (K[batch, channel, key]*Q[batch, channel, query]).sum(channel)
     A = softmax(A * (channel.size ** -0.5), dim=key)
     R = (V[batch, channel, key] * A).sum(key)
-    return torch.cat((R.positional(batch, channel, query), Q), dim=1)
+    return torch.cat((R.order(batch, channel, query), Q), dim=1)
 ```
 
 einops
@@ -254,8 +256,7 @@ def pixel_shuffle_einops(img, upscale_factor=2):
 
 def pixel_shuffle(img, upscale_factor=2):
     h2, w2, c, b, h, w = dims(upscale_factor, upscale_factor)
-    return img[b, (c, h2, w2), h, w]
-
+    return img[b, (c, h2, w2), h, w].order(b, c, (h, h2), (w, w2))
 ```
 
 
@@ -316,7 +317,7 @@ def multiheadattention(q, k, v, num_attention_heads, dropout_prob, use_positiona
     context_layer = (attention_probs*v).sum(key_sequence)
 
     # flatten heads back into features
-    return context_layer.positional(batch, query_sequence, [heads, features])
+    return context_layer.order(batch, query_sequence, [heads, features])
 ```
 
 indirect indexing
@@ -327,14 +328,14 @@ from torch import where
 def triu(A):
    i,j = dims()
    a = A[i, j]
-   return torch.where(i <= j, a, 0).positional(i, j)
+   return torch.where(i <= j, a, 0).order(i, j)
 ```
 
 ```{code-cell} ipython3
 def embedding_bag(input, embedding_weights):
     batch, sequence = dims()
     r = embedding_weights[input[batch, sequence], features].sum(sequence)
-    return r.positional(batch, features)
+    return r.order(batch, features)
 ```
 
 Relative positional embeddings associate an embedding vector with the distance between the query and the key in the sequence.
@@ -356,7 +357,7 @@ def relative_positional_embedding(q, k, distance_embedding_weight):
 
     relative_position_scores_query = (q*positional_embedding).sum(features)
     relative_position_scores_key = (k*positional_embedding).sum(features)
-    return  (relative_position_scores_query + relative_position_scores_key).positional(batch, heads, key_sequence, query_sequence)
+    return  (relative_position_scores_query + relative_position_scores_key).order(batch, heads, key_sequence, query_sequence)
 ```
 
 
@@ -387,7 +388,7 @@ def outer_spec(a, b, out):
 
 def outer(a, b):
     i, j = dims()
-    return (a[i] * b[j]).positional(i, j)
+    return (a[i] * b[j]).order(i, j)
 ```
 
 ### Puzzle 4 - diag
@@ -402,7 +403,7 @@ def diag_spec(a, out):
 def diag(a):
     # the syntax closely matches the spec
     i = dims()
-    return a[i, i].positional(i)
+    return a[i, i].order(i)
 ```
 
 ### Puzzle 5 - eye
@@ -417,7 +418,7 @@ def eye_spec(out):
 
 def eye(j: int):
     i,j = dims(j, j)
-    return where(i.eq(j), 1, 0).positional(i, j)
+    return where(i.eq(j), 1, 0).order(i, j)
 ```
 
 ### Puzzle 6 - triu
@@ -435,7 +436,7 @@ def triu_spec(out):
 
 def triu(j: int):
     i,j = dims(j, j)
-    return where(i <= j, 1, 0).positional(i, j)
+    return where(i <= j, 1, 0).order(i, j)
 ```
 
 ### Puzzle 8 - diff
@@ -450,7 +451,7 @@ def diff_spec(a, out):
 def diff(a, i: int):
     i = dims()
     d = a[i] - a[i - 1]
-    return where(i - 1 >= 0, d, a[i]).positional(i)
+    return where(i - 1 >= 0, d, a[i]).order(i)
 ```
 
 ### Puzzle 9 - vstack
@@ -465,7 +466,7 @@ def vstack_spec(a, b, out):
 
 def vstack(a, b):
     v, i = dims(2)
-    return where(v.eq(0),  a[i], b[i]).positional(v, i)
+    return where(v.eq(0),  a[i], b[i]).order(v, i)
 ```
 
 ### Puzzle 10 - roll
@@ -482,7 +483,7 @@ def roll_spec(a, out):
 
 def roll(a, i: int):
     i = dims(a.size(0))
-    return a[where(i + 1 < i.size, i + 1, 0)].positional(i)
+    return a[where(i + 1 < i.size, i + 1, 0)].order(i)
 ```
 
 ### Puzzle 11 - flip
@@ -496,7 +497,7 @@ def flip_spec(a, out):
 
 def flip(a, i: int):
     i = dims(a.size(0))
-    return a[i.size - i - 1].positional(i)
+    return a[i.size - i - 1].order(i)
 ```
 
 ### Puzzle 14 - sequence_mask
@@ -516,7 +517,7 @@ def sequence_mask_spec(values, length, out):
 def sequence_mask(values, length):
     j, i = dims()
     v = values[i, j]
-    return where(j < length[i], v, 0).positional(i, j)
+    return where(j < length[i], v, 0).order(i, j)
 ```
 
 Advantages of First-class Dimensions over Named (string) Dimensions
@@ -534,7 +535,7 @@ to `mm`, and even though they both use the name `i` to identify a dimension.  Be
 def mm(A, B):
     i, j, k = dims()
     r = (A[i, k] * B[k, j]).sum(k)
-    return r.positional(i, j)
+    return r.order(i, j)
 
 def bmm(A, B):
     i = dims() # note: doesn't matter than mm internally also uses i

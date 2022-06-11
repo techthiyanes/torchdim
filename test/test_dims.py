@@ -37,7 +37,7 @@ def triu(A):
    i,j = dims()
    a = A[i, j]
    zero = torch.tensor(0, dtype=torch.float) # XXX - torch.where is janky...
-   return torch.where(i <= j, a, zero).positional(i, j)
+   return torch.where(i <= j, a, zero).order(i, j)
 
 def gpu_time(lmb, name, r=100):
         b = torch.cuda.Event(enable_timing=True)
@@ -99,14 +99,14 @@ class TestMin(TestCase):
         A = A_[i,k]
         B = B_[k,j]
         C = (A.expand(j) * B.expand(i)).sum(k)
-        self.assertTrue(torch.allclose(C.positional(i, j), torch.mm(A_, B_)))
+        self.assertTrue(torch.allclose(C.order(i, j), torch.mm(A_, B_)))
         self.assertTrue(torch.allclose(torch.triu(A_, 0), triu(A_)))
 
         D_ = torch.randint(0, 3, (6,))
         d = dims()
         D = D_[d]
 
-        A.index([i], [D]).positional(k, d)
+        A.index([i], [D]).order(k, d)
 
     def attn(self, batch_size = 1, sequence_length = 4, hidden_size = 6, num_attention_heads = 3, linear=Linear, device=None, time=False):
         def maybe_to(x):
@@ -183,15 +183,15 @@ class TestMin(TestCase):
         A = torch.rand(4, 5)
         r = stack([A[i,j]], d, j)
         #a, b = r.unbind(d)
-        #self.assertTrue(torch.allclose(a.positional(i, j), i.expand(j).positional(i, j)))
-        #self.assertTrue(torch.allclose(b.positional(i, j), j.expand(i).positional(i, j)))
+        #self.assertTrue(torch.allclose(a.order(i, j), i.expand(j).order(i, j)))
+        #self.assertTrue(torch.allclose(b.order(i, j), j.expand(i).order(i, j)))
 
     def test_max(self):
         ap = torch.rand(2, 3, 2)
         i, j, k = dims()
         a = ap[i, j, k]
         r, i0 = a.max(dim=k)
-        self.assertTrue(torch.allclose(r.positional(i, j), ap.max(2)[0]))
+        self.assertTrue(torch.allclose(r.order(i, j), ap.max(2)[0]))
 
     def test_mm(self):
         i, j, k, q = dims()
@@ -200,8 +200,8 @@ class TestMin(TestCase):
         a_ = a[i,k]
         b_ = b[k, j]
         q.size = 1
-        r = (a_.expand(j, q)*b_.expand(i, q)).sum(k).positional(q, i, j)
-        #r = (a_*b_).sum(k).positional(q, i, j)
+        r = (a_.expand(j, q)*b_.expand(i, q)).sum(k).order(q, i, j)
+        #r = (a_*b_).sum(k).order(q, i, j)
         # print(r)
         # print(a @ b)
 
@@ -210,7 +210,7 @@ class TestMin(TestCase):
         i, j, k = dims()
         k.size = 4
         r = a[i, [j, k]]
-        x = r.positional(i, [j, k])
+        x = r.order(i, [j, k])
         self.assertTrue(torch.allclose(a, x))
 
     def test_hello(self):
@@ -221,7 +221,7 @@ class TestMin(TestCase):
 
 
         # r = A[i]*4
-        r = (A[i, k] * B[k, j]).sum(k).positional(i, j)
+        r = (A[i, k] * B[k, j]).sum(k).order(i, j)
         assert torch.allclose(r, A@B)
 
         assert A.sum() == A[i].sum((0, i))
@@ -230,48 +230,48 @@ class TestMin(TestCase):
         assert torch.allclose(A.sum(), A[i].sum(0, keepdim=True).sum( (0,i) ))
         assert torch.allclose(A[i].std(i, True), A.std(0, True))
 
-        assert torch.allclose(A[i, k].max(i)[0].positional(k), A.max(0)[0])
-        assert torch.allclose(A.sort(1)[0], A[i,k].sort(k)[0].positional(i,k))
+        assert torch.allclose(A[i, k].max(i)[0].order(k), A.max(0)[0])
+        assert torch.allclose(A.sort(1)[0], A[i,k].sort(k)[0].order(i,k))
         # XXX - chunk changes the size of a dimension, has to take a new dimension...
-        # assert torch.allclose(A.chunk(2,1)[0], A[i, k].chunk(2, k)[0].positional(i, k))
-        assert torch.allclose(A[i].renorm(1, i, 7).positional(i), A.renorm(1, 0, 7))
+        # assert torch.allclose(A.chunk(2,1)[0], A[i, k].chunk(2, k)[0].order(i, k))
+        assert torch.allclose(A[i].renorm(1, i, 7).order(i), A.renorm(1, 0, 7))
         kk = dims()
-        # assert torch.allclose( torch.stack([A, A], 1), stack([A[i,k], A[i, k]], kk, k).positional(i, kk, k))
+        # assert torch.allclose( torch.stack([A, A], 1), stack([A[i,k], A[i, k]], kk, k).order(i, kk, k))
 
         k2 = dims()
         # r = cat((A[i, k], A[i,k]), k, k2)
-        # assert torch.allclose(torch.cat([A, A], 1), r.positional(i, k2))
+        # assert torch.allclose(torch.cat([A, A], 1), r.order(i, k2))
         # assert k2.size == 2*k.size
 
-        assert torch.allclose(A.expand(5, -1, -1), A[i, k].expand(j).positional(j, i, k))
+        assert torch.allclose(A.expand(5, -1, -1), A[i, k].expand(j).order(j, i, k))
         z = dims()
         C = torch.arange(2)
-        assert torch.allclose(A[:,0:2], A[i, k].index(k, C[z]).positional(i, z))
+        assert torch.allclose(A[:,0:2], A[i, k].index(k, C[z]).order(i, z))
 
         o,l = dims()
         o.size = 2
         r = A[i, k].index(k, (o, l))
-        assert torch.allclose(r.positional(i, o, l), A.view(-1, 2, 2))
+        assert torch.allclose(r.order(i, o, l), A.view(-1, 2, 2))
         rr = r.index((o, l), k)
-        assert torch.allclose(A, rr.positional(i,k))
+        assert torch.allclose(A, rr.order(i,k))
 
         r = i + k - 1
         r2 =  torch.arange(3)[:, None] + torch.arange(4)[None, :] - 1
-        assert torch.allclose(r.positional(i, k), r2)
+        assert torch.allclose(r.order(i, k), r2)
 
         # test with ...
-        assert torch.allclose(A.T, A[..., k].positional(k))
+        assert torch.allclose(A.T, A[..., k].order(k))
 
         # test with dimlist
         a_,b_ = dims(lists=2)
-        assert torch.allclose(A[i, a_].positional(*a_, i), A.T)
+        assert torch.allclose(A[i, a_].order(*a_, i), A.T)
         # test with one bound dimlist
-        assert torch.allclose(A[:, a_].positional(*a_), A.T)
+        assert torch.allclose(A[:, a_].order(*a_), A.T)
         # test with a dimlist that will end up empty
-        assert torch.allclose(A[i, b_, k].positional(i, k, *b_), A)
+        assert torch.allclose(A[i, b_, k].order(i, k, *b_), A)
         # test with too few things
         print((A[i] + i))
-        assert torch.allclose((A[i] + i).positional(i), A + torch.arange(3)[:, None])
+        assert torch.allclose((A[i] + i).order(i), A + torch.arange(3)[:, None])
         # test with too many elements
         try:
             A[1,...,1,1]
@@ -280,9 +280,9 @@ class TestMin(TestCase):
             pass
         c, d = dims()
         c.size = 2
-        assert torch.allclose(A[i, [c,d]].positional(i, c, d), A.view(3, 2, 2))
+        assert torch.allclose(A[i, [c,d]].order(i, c, d), A.view(3, 2, 2))
 
-        assert torch.allclose(A[c + 1, c + 0].positional(c), A[torch.arange(2) + 1, torch.arange(2)])
+        assert torch.allclose(A[c + 1, c + 0].order(c), A[torch.arange(2) + 1, torch.arange(2)])
         try:
             A[..., 3, ...]
             raise NotImplemented()
@@ -297,10 +297,10 @@ class TestMin(TestCase):
         ref = C.split((3,3,1), dim=1)
         t = C[s,c_].split((x,y,z), dim=c_)
         for a,b,d in zip(ref, t, (x,y,z)):
-            assert torch.allclose(a, b.positional(s,d))
+            assert torch.allclose(a, b.order(s,d))
 
         D = torch.rand(3, 4, 5)
-        assert torch.allclose(D.transpose(0, 1).flatten(1,2), D[i, k, j].positional((i, j)).positional(k))
+        assert torch.allclose(D.transpose(0, 1).flatten(1,2), D[i, k, j].order((i, j)).order(k))
 
 
         r = torch.rand_like(A[i, k]).dims
@@ -313,14 +313,14 @@ class TestMin(TestCase):
         x = torch.rand(3, 4)
         z = x[i, j]
         print(z + z + z + z)
-        print(z.positional(i, j))
+        print(z.order(i, j))
 
     def test_mm_fuse(self):
         i, j, k = dims()
         A = torch.rand(3, 4)
         B = torch.rand(4, 5)
 
-        C = (A[i, k] * B[k, j]).sum(k).positional(i, j)
+        C = (A[i, k] * B[k, j]).sum(k).order(i, j)
         assert torch.allclose(C, A @ B)
 
     def test_time_mm_fuse(self):
@@ -344,11 +344,11 @@ class TestMin(TestCase):
 
         with measure('fc'):
             for _ in range(10000):
-                (A[i, k] * B[k, j]).sum(k).positional(i, j)
+                (A[i, k] * B[k, j]).sum(k).order(i, j)
 
         with magic_trace('f.fxt'):
             for _ in range(10000):
-                (A[i, k] * B[k, j]).sum(k).positional(i, j)
+                (A[i, k] * B[k, j]).sum(k).order(i, j)
 
         with magic_trace('p.fxt'):
             for _ in range(10000):
@@ -357,7 +357,7 @@ class TestMin(TestCase):
         # magic_trace_stop_indicator()
 
 
-        assert torch.allclose(r1.positional(i,j), r0)
+        assert torch.allclose(r1.order(i,j), r0)
 
     def test_compare_dims(self):
         i, j = dims()
@@ -378,7 +378,7 @@ class TestMin(TestCase):
     def test_expand(self):
         A = torch.rand(3, 4)
         i = dims()
-        assert list(A[i].expand(2, 4).positional(i).size()) == [3, 2, 4]
+        assert list(A[i].expand(2, 4).order(i).size()) == [3, 2, 4]
 
     def test_parse(self):
         self.assertEqual(("x", None, None, None), _parse_test(1, 0, "x"))
@@ -405,7 +405,7 @@ class TestMin(TestCase):
 
         i = dims()
         r = rn(img[i])
-        r = r.positional(i).view(2, 1000)
+        r = r.order(i).view(2, 1000)
         r2 = rn(imgf)
         assert torch.allclose(r2, r, atol=1e-06)
 
@@ -440,7 +440,7 @@ class TestMin(TestCase):
 
         m, _ = m_b.max(g)
         c = torch.exp(m_b - m)
-        f = (c*f_b).positional((i, g))
+        f = (c*f_b).order((i, g))
         l = (c*l_b).sum(g)
         assert torch.allclose(f/l, torch.nn.functional.softmax(a, dim=0))
 
@@ -452,17 +452,17 @@ class TestMin(TestCase):
         o,l = dims()
         o.size = 2
         r = A[i, k].index(k, [o, l])
-        assert torch.allclose(r.positional(i, o, l), A.view(-1, 2, 2))
+        assert torch.allclose(r.order(i, o, l), A.view(-1, 2, 2))
         rr = r.index([o, l], k)
-        assert torch.allclose(A, rr.positional(i,k))
+        assert torch.allclose(A, rr.order(i,k))
         z = dims()
         C = torch.arange(2)
-        x = A[i, k].index(k, C[z]).positional(i, z)
+        x = A[i, k].index(k, C[z]).order(i, z)
         assert torch.allclose(A[:,0:2], x)
 
         C = torch.rand(3, 4, 5)
         ik = dims()
-        assert torch.allclose(C.index((0,2), ik).positional(ik), C.permute(0,2,1).reshape(15,4))
+        assert torch.allclose(C.index((0,2), ik).order(ik), C.permute(0,2,1).reshape(15,4))
 
     # failures that came up from monkey patching some operators...
     def test_monkey(self):
@@ -488,9 +488,16 @@ class TestMin(TestCase):
         i, j = dims(2,4)
 
         a = A[:, i+0, :, j+0]
-        r = a.positional(i, j)
+        r = a.order(i, j)
 
         assert torch.allclose(A.permute(1, 3, 0, 2), r)
+
+    def test_order(self):
+        i, j = dims()
+        A = torch.rand(3, 4, 5)
+        assert torch.allclose(A[i].order(1, i), A.permute(2, 0, 1))
+
+
 
 
 if __name__ == '__main__':

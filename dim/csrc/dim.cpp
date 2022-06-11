@@ -1776,28 +1776,45 @@ static PyObject* _wrap_method(PyObject *self,
     PY_END(nullptr);
 }
 
+static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim);
 
-static PyObject* positional(PyObject *_,
+static PyObject* order(PyObject *_,
                       PyObject *const *args,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
     Arena A;
     PY_BEGIN
     AT_ASSERT(nargs-- > 0);
-    auto self = Tensor::unchecked_wrap(args++[0]);
-
-    at::Tensor& data = self->tensor(A);
-
-    auto levels = Slice<DimEntry>();
-    levels.extend(A, self->levels());
+    Slice<DimEntry> orig_levels;
+    Slice<DimEntry> levels;
+    TensorRef data;
+    py::handle self = args++[0];
+    bool has_device;
+    if (Tensor::check_exact(self)) {
+        auto t = Tensor::unchecked_wrap(self);
+        orig_levels = t->levels();
+        data = t->tensor(A);
+        has_device = t->has_device();
+    } else {
+       auto d = Dim::unchecked_wrap(self);
+        orig_levels.append(A, d);
+        data = d->range();
+        has_device = false;
+    }
 
     Slice<DimEntry> flat_positional_dims;
     Slice<std::pair<int, int>> to_flatten;
+    levels.extend(A, orig_levels);
 
-    auto append = [&](py::hdl<Dim> d) {
+    int orig_ndim = ndim_of_levels(levels);
+    auto append = [&](DimEntry d) {
         auto midx = levels.index(d);
         if (!midx) {
-            py::raise_error(DimensionBindError(), "tensor of dimensions %R does not contain dim %R", levels_to_tuple(self->levels()).ptr(), d.ptr());
+            if (d.is_positional()) {
+                py::raise_error(PyExc_ValueError, "tensor has %d positional dimensions, but %d specified, or it was specified twice", int(orig_ndim), int(d.position() + orig_ndim));
+            } else {
+                py::raise_error(PyExc_ValueError, "tensor of dimensions %R does not contain dim %R or it was specified twice", levels_to_tuple(levels).ptr(), d.dim().ptr());
+            }
         }
         levels[*midx] = DimEntry();
         flat_positional_dims.append(A, d);
@@ -1806,18 +1823,18 @@ static PyObject* positional(PyObject *_,
     int n_new_positional = 0;
     for (auto i :irange(nargs)) {
         py::handle arg  = args[i];
-        if (Dim::check_exact(arg)) {
-            append(Dim::unchecked_wrap(arg));
+        DimEntry entry = _wrap_dim(arg, orig_ndim, false);
+        if (!entry.is_none()) {
+            append(entry);
             ++n_new_positional;
         } else if (DimList::check(arg)) {
             auto dl = DimList::unchecked_wrap(arg);
             for (py::obj<Dim> & d : dl->dims_) {
-                append(d);
+                append(py::hdl<Dim>(d));
                 ++n_new_positional;
             }
         } else {
             ++n_new_positional;
-
             if (!py::is_sequence(arg)) {
                 py::raise_error(PyExc_ValueError, "expected a Dim, List[Dim], or Sequence[Dim]");
             }
@@ -1825,15 +1842,18 @@ static PyObject* positional(PyObject *_,
             auto N = sq.size();
             to_flatten.append(A, std::make_pair(flat_positional_dims.size(), N));
             for (auto j : irange(N)) {
-                py::obj<Dim> d = Dim::wrap(sq[j]);
-                append(d);
+                DimEntry e = _wrap_dim(A.autorelease(sq[j]), orig_ndim, false);
+                if (e.is_none()) {
+                    py::raise_error(PyExc_ValueError, "expected a Dim, or int");
+                }
+                append(e);
             }
         }
     }
 
+    int ndim = 0;
     int insert_point = -1;
     Slice<DimEntry> new_levels;
-    int ndim = 0;
     for (auto l : levels) {
         if (l.is_none()) {
             continue;
@@ -1852,23 +1872,20 @@ static PyObject* positional(PyObject *_,
         new_levels.extend(A, flat_positional_dims);
     }
 
-    auto ndata = _match_levels(A, data, self->levels(), new_levels);
+    at::Tensor ndata = *_match_levels(A, data, orig_levels, new_levels);
+
     if (to_flatten.size()) {
-        Slice<DimEntry> flat_new_levels;
         Slice<int64_t> view;
-        auto sz = ndata->sizes();
+        auto sz = ndata.sizes();
         // before the new positional dims
         for (auto i : irange(0, insert_point)) {
-            flat_new_levels.append(A, new_levels[i]);
             view.append(A, sz[i]);
         }
         int i = 0;
         for (auto to_flat : to_flatten) {
             for (;i < to_flat.first; ++i) {
                 view.append(A, sz[insert_point + i]);
-                flat_new_levels.append(A, -ndim - n_new_positional + (flat_new_levels.size() - insert_point));
             }
-            flat_new_levels.append(A, -ndim - n_new_positional + (flat_new_levels.size() - insert_point));
             int64_t new_size = 1;
             int last = i + to_flat.second;
             for (; i < last; ++i) {
@@ -1878,21 +1895,26 @@ static PyObject* positional(PyObject *_,
         }
         for (; i < flat_positional_dims.size(); ++i) {
             view.append(A, sz[insert_point + i]);
-            flat_new_levels.append(A, -ndim - n_new_positional + (flat_new_levels.size() - insert_point));
         }
         // after the new positional dims
-        for (auto i : irange(insert_point + flat_positional_dims.size(), new_levels.size())) {
-            flat_new_levels.append(A, new_levels[i]);
+        for (auto i : irange(insert_point + flat_positional_dims.size(), levels.size())) {
             view.append(A, sz[i]);
         }
-        auto reshaped = ndata->reshape(at::IntArrayRef(view.begin(), view.end()));
-        return Tensor::from_positional(A, std::move(reshaped), flat_new_levels, self->has_device()).release();
-    } else {
-        for (auto i : flat_positional_dims.enumerate()) {
-            new_levels[insert_point + i] = -ndim - n_new_positional + i;
-        }
-        return Tensor::from_positional(A, *ndata, new_levels, self->has_device()).release();
+        // we shorted the number of dimension, so remove them from new levels
+        // we will renumber them later
+        auto n_to_remove = flat_positional_dims.size() - n_new_positional;
+        new_levels.insert(A, new_levels.slice(insert_point, insert_point + n_to_remove), Slice<DimEntry>());
+        ndata = std::move(ndata).reshape(at::IntArrayRef(view.begin(), view.end()));
     }
+
+    // renumber the positional dimension
+    int seen = 0;
+    for (auto i : new_levels.reversed_enumerate()) {
+        if (new_levels[i].is_positional() || (i >= insert_point && i < insert_point + n_new_positional)) {
+            new_levels[i] = --seen;
+        }
+    }
+    return Tensor::from_positional(A, std::move(ndata), new_levels, has_device).release();
 
     PY_END(nullptr)
 }
@@ -2036,7 +2058,6 @@ bool is_dimpack(py::handle s) {
 
 IndexingInfo getsetitem_flat(Arena& A, TensorInfo self_info, Slice<py::handle> input, Slice<DimEntry> keys, Slice<py::handle> values, bool has_dimpacks_or_none);
 static py::object invoke_getitem(Arena& A, const IndexingInfo& iinfo);
-static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim);
 
 static py::object index(Arena& A, py::handle self, py::handle dims, py::handle indices) {
     maybeInitializeGlobals();
@@ -3076,7 +3097,7 @@ static PyMethodDef methods[] = {
     {"Tensor_from_batched", (PyCFunction) py_Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
     {"__torch_function__", (PyCFunction) py___torch_function__, METH_FASTCALL | METH_KEYWORDS},
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
-    {"positional", (PyCFunction) positional, METH_FASTCALL | METH_KEYWORDS},
+    {"order", (PyCFunction) order, METH_FASTCALL | METH_KEYWORDS},
     {"index", (PyCFunction) py_index, METH_FASTCALL | METH_KEYWORDS},
     {"stack", (PyCFunction) py_stack, METH_FASTCALL | METH_KEYWORDS},
     {"split", (PyCFunction) py_split, METH_FASTCALL | METH_KEYWORDS},

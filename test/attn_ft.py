@@ -8,7 +8,7 @@ class Linear(nn.Linear):
     def forward(self, input):
         ci, co, b = dims(lists=1)
         result = (input[b, ci] * self.weight[co, ci]).sum(ci) + self.bias[co]
-        return result.positional(b, co)
+        return result.order(b, co)
 
 class BertSelfAttention(nn.Module):
     def __init__(self, hidden_size, num_attention_heads, attention_probs_dropout_prob, position_embedding_type=None, max_position_embeddings=None, linear=Linear):
@@ -128,4 +128,4 @@ class BertSelfAttention(nn.Module):
 
         # finally, we convert back to a standard tensor by describing the layout of dimensions.
         # working in reverse to with_dims, the (heads, features) group flattens the dimensions into a single one.
-        return context_layer.positional(batch, query_sequence, [heads, features])
+        return context_layer.order(batch, query_sequence, [heads, features])
