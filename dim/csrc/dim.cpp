@@ -304,8 +304,6 @@ static PyGetSetDef Dim_getsetters[] = {
     {NULL}  /* Sentinel */
 };
 
-static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op);
-
 PyTypeObject Dim::Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "_C.Dim",               /* tp_name */
@@ -330,7 +328,7 @@ PyTypeObject Dim::Type = {
     "Dim Object",                   /* tp_doc */
     0,                              /* tp_traverse */
     0,                              /* tp_clear */
-    (richcmpfunc) Dim_richcompare,  /* tp_richcompare */
+    0,  /* tp_richcompare */
     0,                              /* tp_weaklistoffset */
     0,                              /* tp_iter */
     0,                              /* tp_iternext */
@@ -346,33 +344,6 @@ PyTypeObject Dim::Type = {
     0,                              /* tp_alloc */
     Dim::new_stub,                      /* tp_new */
 };
-
-
-py::handle rich_comparison_fns[6];
-const char* rich_comparison_table[] = {
-    "__lt__",
-    "__le__",
-    "__eq__",
-    "__ne__",
-    "__gt__",
-    "__ge__"
-};
-
-static PyObject *Dim_richcompare(Dim *self, PyObject *other, int op) {
-    PY_BEGIN
-        if (op == Py_EQ || op == Py_NE)  {
-            Py_RETURN_RICHCOMPARE( (void*)self, (void*) other, op);
-        } else {
-            if (!rich_comparison_fns[0].ptr()) {
-                for (auto i : irange(6)) {
-                    auto r = py::import("dim").attr("_Tensor");
-                    rich_comparison_fns[i] = r.attr(rich_comparison_table[i]);
-                }
-            }
-            return rich_comparison_fns[op].call(py::handle(self->ptr()), py::handle(other)).release();
-        }
-    PY_END(nullptr)
-}
 
 // class DimList ------------
 
@@ -1317,6 +1288,10 @@ static py::object __torch_function__(Arena &A, py::handle orig, py::vector_args 
             Slice<DimEntry> levels;
             for (auto i : args.enumerate_positional()) {
                 auto t = TensorInfo::create(A, args[i], false);
+                // something like a mask * rhs, which matrix multiplies don't correctly promote
+                if (!t.tensor->is_floating_point()) {
+                    return run_torch_function(A, orig, args, is_pointwise);
+                }
                 has_device = has_device || t.has_device;
                 for (auto l : t.levels) {
                     if (!levels.contains(l)) {

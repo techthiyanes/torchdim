@@ -303,10 +303,10 @@ class TestMin(TestCase):
         assert torch.allclose(D.transpose(0, 1).flatten(1,2), D[i, k, j].order((i, j)).order(k))
 
 
-        r = torch.rand_like(A[i, k]).dims
-        assert i in r and k in r
-        r = torch.nn.functional.dropout(A[i, k]).dims
-        assert i in r and k in r
+        r = [id(x) for x in torch.rand_like(A[i, k]).dims]
+        assert id(i) in r and id(k) in r
+        r = [id(x) for x in torch.nn.functional.dropout(A[i, k]).dims]
+        assert id(i) in r and id(k) in r
 
     def test_simple(self):
         i, j, k = dims()
@@ -497,8 +497,14 @@ class TestMin(TestCase):
         A = torch.rand(3, 4, 5)
         assert torch.allclose(A[i].order(1, i), A.permute(2, 0, 1))
 
+    def test_mask(self):
+        a = torch.rand(5)
+        i,j = dims(a.size(0), a.size(0))
+        ((i >= j) * a[i]).sum(j).order(i)
 
-
+    def test_eq(self):
+        i, j = dims(3, 3)
+        assert (i == j).sum((i, j)) == 3
 
 if __name__ == '__main__':
     main()

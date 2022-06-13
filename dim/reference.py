@@ -27,9 +27,9 @@ def _wrap_dim(d, N, keepdim):
 def _dims(d, N, keepdim, single_dim):
     from . import Dim
     if isinstance(d, (Dim, int)):
-        return (_wrap_dim(d, N, keepdim),)
+        return ltuple((_wrap_dim(d, N, keepdim),))
     assert not single_dim, f"expected a single dimension or int but found: {d}"
-    return tuple(_wrap_dim(x, N, keepdim) for x in d)
+    return ltuple(_wrap_dim(x, N, keepdim) for x in d)
 
 def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
     from . import DimensionMismatchError
@@ -51,9 +51,9 @@ def _bind_dims_to_size(lhs_size, rhs, lhs_debug):
 def _tensor_levels(inp):
     from . import _Tensor
     if isinstance(inp, _Tensor):
-        return inp._tensor, list(inp._levels), inp._has_device
+        return inp._tensor, llist(inp._levels), inp._has_device
     else:
-        return inp, list(range(-inp.ndim, 0)), True
+        return inp, llist(range(-inp.ndim, 0)), True
 
 def _match_levels(v, from_levels, to_levels):
     view = []
@@ -80,7 +80,7 @@ def _match_levels(v, from_levels, to_levels):
 # should not physically move if possible
 def _positional_no_permute(self, dim, expand_dim=False):
     from . import Tensor
-    ptensor, levels = self._tensor, list(self._levels)
+    ptensor, levels = self._tensor, llist(self._levels)
     try:
         idx = levels.index(dim)
     except ValueError:
@@ -97,9 +97,38 @@ def _positional_no_permute(self, dim, expand_dim=False):
     levels[idx] = -idx_batched - 1
     return Tensor.from_positional(ptensor, levels, self._has_device), idx_batched
 
+def seq(a, b):
+    from . import Dim
+    if isinstance(a, Dim) != isinstance(b, Dim):
+        return False
+    if isinstance(a, Dim):
+        return a is b
+    else:
+        return a == b
+
+class isin:
+    def __contains__(self, item):
+        for x in self:
+            if seq(item, x):
+                return True
+        return False
+
+    def index(self, item):
+        for i, x in enumerate(self):
+            if seq(item, x):
+                return i
+        raise ValueError
+
+
+class llist(isin, list):
+    pass
+
+class ltuple(isin, tuple):
+    pass
+
 @classmethod
 def __torch_function__(self, orig, cls, args, kwargs={}):
-    from . import _Tensor, TensorLike, Tensor, _enable_layers
+    from . import _Tensor, TensorLike, Tensor
     from .delayed_mul_tensor import DelayedMulTensor
 
     if orig is torch.Tensor.__mul__:
@@ -107,7 +136,7 @@ def __torch_function__(self, orig, cls, args, kwargs={}):
         if isinstance(lhs, _Tensor) and isinstance(rhs, _Tensor) and lhs.ndim == 0 and rhs.ndim == 0:
             #print("END", orig)
             return DelayedMulTensor(lhs, rhs)
-    all_dims = []
+    all_dims = llist()
     flat_args, unflatten = tree_flatten((args, kwargs))
     device_holding_tensor = None
     for f in flat_args:
@@ -126,8 +155,8 @@ def __torch_function__(self, orig, cls, args, kwargs={}):
         return t
 
     if orig in pointwise:
-        result_levels = []
-        arg_levels = []
+        result_levels = llist()
+        arg_levels = llist()
         to_expand = []
         for i,f in enumerate(flat_args):
             if isinstance(f, TensorLike):
@@ -163,10 +192,11 @@ def __torch_function__(self, orig, cls, args, kwargs={}):
 
 def positional(self, *dims):
     from . import Dim, Tensor
-    ptensor, levels = self._tensor, list(self._levels)
-    flat_dims = []
+    ptensor, levels = self._tensor, llist(self._levels)
+    flat_dims = llist()
     view = []
     needs_view = False
+    ndim = self.ndim
     for d in dims:
         if isinstance(d, DimList):
             flat_dims.extend(d)
@@ -174,13 +204,16 @@ def positional(self, *dims):
         elif isinstance(d, Dim):
             flat_dims.append(d)
             view.append(d.size)
+        elif isinstance(d, int):
+            d = _wrap_dim(d, ndim, False)
+            flat_dims.append(d)
+            view.append(ptensor.size(d))
         else:
             flat_dims.extend(d)
             view.append(prod(e.size for e in d))
             needs_view = True
 
     permute = list(range(len(levels)))
-    ndim = self.ndim
     nflat = len(flat_dims)
     for i, d in enumerate(flat_dims):
         try:
@@ -190,9 +223,14 @@ def positional(self, *dims):
         p = permute[idx]
         del levels[idx]
         del permute[idx]
-        levels.insert(i, -ndim - (nflat - i))
+        levels.insert(i, 0)
         permute.insert(i, p)
     ptensor = ptensor.permute(*permute)
+    seen = 0
+    for i in range(len(levels) - 1,  -1, -1):
+        if isinstance(levels[i], int):
+            seen += 1
+            levels[i] = -seen
     result = Tensor.from_positional(ptensor, levels, self._has_device)
     if needs_view:
         result = result.reshape(*view, *result.size()[len(flat_dims):])
@@ -235,7 +273,7 @@ def _wrap(orig, dim_offset=0, keepdim_offset=1, dim_name='dim', single_dim=False
                 print(f"dim fallback batch_tensor for {orig}")
                 return Tensor.from_batched(orig(self._batchtensor, *args, **kwargs), self._has_device)
         keepdim = _getarg('keepdim', keepdim_offset, args, kwargs, False) if reduce else False
-        t, levels = self._tensor, list(self._levels)
+        t, levels = self._tensor, llist(self._levels)
         dims = _dims(dim, self._batchtensor.ndim, keepdim, single_dim)
         dim_indices = tuple(levels.index(d) for d in dims)
         if reduce and not keepdim:
@@ -265,6 +303,17 @@ def _def(name, *args, **kwargs):
 no_slice = slice(None)
 
 _orig_getitem = torch.Tensor.__getitem__
+
+class dim_tracker:
+    def __init__(self):
+        self.dims = llist()
+        self.count = []
+    def record(self, d):
+        if d not in self.dims:
+            self.dims.append(d)
+            self.count.append(1)
+    def __getitem__(self, d):
+        return self.count[self.dims.index(d)]
 
 def t__getitem__(self, input):
     from . import Dim, DimensionBindError, _Tensor, TensorLike, DimList, Tensor
@@ -326,13 +375,13 @@ def t__getitem__(self, input):
     requires_view = False
     size = self.size()
     view_sizes = []
-    dims_seen = defaultdict(lambda: 0)
+    dims_seen = dim_tracker()
 
     def add_dims(t):
         if not isinstance(t, _Tensor):
             return
         for d in t.dims:
-            dims_seen[d] += 1
+            dims_seen.record(d)
 
     add_dims(self)
     dim_packs = []
@@ -345,11 +394,11 @@ def t__getitem__(self, input):
             sz = size[dims_indexed]
             if isinstance(idx, Dim):
                 idx.size = sz
-                dims_seen[idx] += 1
+                dims_seen.record(idx)
                 view_sizes.append(sz)
             elif isinstance(idx, (tuple, list)) and idx and isinstance(idx[0], Dim):
                 for d in idx:
-                    dims_seen[d] += 1
+                    dims_seen.record(idx)
                 _bind_dims_to_size(sz, idx, f'offset {i}')
                 view_sizes.extend(d.size for d in idx)
                 requires_view=True

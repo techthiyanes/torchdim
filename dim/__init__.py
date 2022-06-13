@@ -52,11 +52,10 @@ class _Tensor:
 TensorLike = (_Tensor, torch.Tensor)
 
 class Dim(_C.Dim, _Tensor):
-    # Tensor defines these methods for actual tensor data
-    # we want dims to behave like individual objects for
-    # hashing and printing, so we revert back to the object implementation
+    # note that _C.Dim comes before tensor because we want the Dim API for things like size to take precendence.
+    # Tensor defines format, but we want to print Dims with special formatting
     __format__ = object.__format__
-    __hash__ = object.__hash__
+
 
 class Tensor(_Tensor, _C.Tensor):
     from_batched = staticmethod(_C.Tensor_from_batched)
