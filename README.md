@@ -76,12 +76,10 @@ print(input_fc.dims) # first class dimensions
 # (batch, channel, width, height)
 ```
 
-
 ```{code-cell} ipython3
 print(input_fc.ndim) # positional dimensions
 # 0
 ```
-
 
 ```{code-cell} ipython3
 input_mixed = input[batch, :, :, height]
@@ -89,12 +87,10 @@ print(input_mixed.dims)
 # (batch, height)
 ```
 
-
 ```{code-cell} ipython3
 print(input_mixed.ndim)
 # 2
 ```
-
 
 Dimensions will take on the size of the first thing they are bound to:
 
@@ -102,7 +98,6 @@ Dimensions will take on the size of the first thing they are bound to:
 print(batch.size)
 # 2
 ```
-
 
 But you can also directly set the size of dimension:
 
@@ -232,7 +227,6 @@ A = torch.rand(6, 4)
 a = A[(i, j), k] # split dim 0 into i,j
 print(i.size, j.size, k.size)
 # 3 2 4
-
 ```
 
 ```{code-cell} ipython3

@@ -8,6 +8,12 @@
 #define PY_BEGIN try {
 #define PY_END(v) } catch(py::exception_set & err) { return (v); }
 
+#if PY_VERSION_HEX < 0x03080000
+    #define PY_VECTORCALL _PyObject_FastCallKeywords
+#else
+    #define PY_VECTORCALL _PyObject_Vectorcall
+#endif
+
 struct irange {
  public:
     irange(int64_t end)
@@ -293,7 +299,7 @@ inline object handle::call_object(py::handle args, py::handle kwargs) {
 }
 
 inline object handle::call_vector(py::handle* begin, Py_ssize_t nargs, py::handle kwnames) {
-    return object::checked_steal(_PyObject_Vectorcall(ptr(), (PyObject*const*) begin, nargs, kwnames.ptr()));
+    return object::checked_steal(PY_VECTORCALL(ptr(), (PyObject*const*) begin, nargs, kwnames.ptr()));
 }
 
 struct tuple : public object {
@@ -589,9 +595,29 @@ struct vector_args {
             const char** names_buf = new const char*[names.size() + 1];
             std::copy(names.begin(), names.end(), &names_buf[0]);
             names_buf[names.size()] = nullptr;
+
+#if PY_VERSION_HEX < 0x03080000
+            char* format_str = new char[names.size() + 3];
+            int i = 0;
+            char* format_it = format_str;
+            for (auto it = names.begin(); it != names.end(); ++it, ++i) {
+                if (i == required) {
+                    *format_it++ = '|';
+                }
+                if (i == names.size() - kwonly) {
+                    *format_it++ = '$';
+                }
+                *format_it++ = 'O';
+            }
+            *format_it++ = '\0';
+            _PyArg_Parser* _parser = new _PyArg_Parser{format_str, &names_buf[0], fname_cstr, 0};
+            _PyArg_ParseStackAndKeywords((PyObject*const*)args, nargs, kwnames.ptr(), _parser);
+            throw exception_set();
+#else
             _PyArg_Parser* _parser = new _PyArg_Parser{NULL, &names_buf[0], fname_cstr, 0};
             std::unique_ptr<PyObject*[]> buf(new PyObject*[names.size()]);
             _PyArg_UnpackKeywords((PyObject*const*)args, nargs, NULL, kwnames.ptr(), _parser, required, values.size() - kwonly, 0, &buf[0]);
+#endif
             throw exception_set();
         };
 
@@ -653,9 +679,8 @@ struct vector_args {
     }
 };
 
-
 inline object handle::call_vector(vector_args args) {
-    return object::checked_steal(_PyObject_Vectorcall(ptr(), (PyObject*const*) args.args, args.nargs, args.kwnames.ptr()));
+    return object::checked_steal(PY_VECTORCALL(ptr(), (PyObject*const*) args.args, args.nargs, args.kwnames.ptr()));
 }
 
 
