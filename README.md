@@ -1,4 +1,4 @@
-<!-- ---
+---
 jupytext:
   cell_metadata_filter: -all
   formats: md:myst
@@ -11,7 +11,7 @@ kernelspec:
   display_name: Python 3 (ipykernel)
   language: python
   name: python3
---- -->
+---
 
 First-class Dimensions
 ======================
@@ -69,29 +69,41 @@ input = torch.rand(2, 3, 224, 224)
 print(input.ndim)
 ```
 
+    > 4
+
 ```{code-cell} ipython3
 input_fc = input[batch, channel, width, height]
 print(input_fc.dims) # first class dimensions
 ```
 
+    > (batch, channel, width, height)
+
 ```{code-cell} ipython3
 print(input_fc.ndim) # positional dimensions
 ```
+
+    > 0
 
 ```{code-cell} ipython3
 input_mixed = input[batch, :, :, height]
 print(input_mixed.dims)
 ```
 
+    > (batch, height)
+
 ```{code-cell} ipython3
 print(input_mixed.ndim)
 ```
+
+    > 2
 
 Dimensions will take on the size of the first thing they are bound to:
 
 ```{code-cell} ipython3
 print(batch.size)
 ```
+
+    > 2
 
 But you can also directly set the size of dimension:
 
@@ -128,6 +140,8 @@ result = input[batch, channels] + bias[channels]
 print(result.dims)
 ```
 
+    > (batch, channels)
+
 It is helpful think of operators on tensors with first-class dimensions by analogy to code with explicit loops over dimensions, with the first-class dimensions of the inputs acting as implicit `for` loops, and the values in the tensor being scalars within the body of the loop:
 
     # mental model: loop-level analogy
@@ -147,6 +161,7 @@ Rule 2: Specifying dimensions
 avg_pixel_color = input_fc.mean((width, height))
 print(avg_pixel_color.dims)
 ```
+    > (batch, channel)
 
 Any other ther first-class dimensions (e.g. batch, channel) are still implicitly batched according to Rule #1.
 
@@ -157,10 +172,12 @@ Rule 3: Dims are Tensors
 ```{code-cell} ipython3
 print(channel.dims)
 ```
+     > (channel,)
 
 ```{code-cell} ipython3
 print(channel + 1000)
 ```
+    > tensor([1000, 1001, 1002])
 
 This means that a dimensions used as a tensor acts as an index into that dimension. Going back to our loop-level analogy, it is analogous to using the loop variable as a value:
 
@@ -178,6 +195,7 @@ words = torch.tensor([5, 4, 0,])
 state = embeddings[words[sequence], features]
 print(state.dims)
 ```
+    > (sequence, features)
 
 With the following analogy to loops:
 
@@ -216,11 +234,13 @@ A = torch.rand(6, 4)
 a = A[(i, j), k] # split dim 0 into i,j
 print(i.size, j.size, k.size)
 ```
+    > 3 2 4
 
 ```{code-cell} ipython3
 r = a.order(i, (j, k)) # flatten j and k
 print(r.shape)
 ```
+    > torch.Size([3, 8])
 
 The size of one unsized dimension in a tuple such as `i` can be inferred if the other sizes are known.
 
