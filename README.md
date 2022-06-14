@@ -55,7 +55,7 @@ Python objects that represent dimension are created using the `dims` operator, w
 
 ```{code-cell} ipython3
 import torch
-from dim import dims
+from torchdim import dims
 
 batch, channel, width, height = dims()
 ```
@@ -238,6 +238,7 @@ def mm(A, B):
     i, j, k = dims()
     r = (A[i, k] * B[k, j]).sum(k)
     return r.order(i, j)
+mm(torch.rand(3, 4), torch.rand(4, 5)).shape
 ```
 
 Creating a batched version of multiply is easy, just add a `b` dimensions to everything:
@@ -247,18 +248,21 @@ def bmm(A, B):
     b, i, j, k = dims()
     r = (A[b, i, k] * B[b, k, j]).sum(k)
     return r.order(b, i, j)
+bmm(torch.rand(3, 4, 5), torch.rand(3, 5, 6)).shape
 ```
 
 You no longer need to recognize that productions like attension are matrix multiplies, the canonical way of writing them will turn into the right optimized operators:
 
 ```{code-cell} ipython3
-from dim import softmax
+from torchdim import softmax
 def attention(K, Q, V):
     batch, channel, key, query = dims()
     A = (K[batch, channel, key]*Q[batch, channel, query]).sum(channel)
     A = softmax(A * (channel.size ** -0.5), dim=key)
     R = (V[batch, channel, key] * A).sum(key)
     return torch.cat((R.order(batch, channel, query), Q), dim=1)
+
+attention(*(torch.rand(2, 3, 4) for _ in range(3))).shape
 ```
 
 `einops`
@@ -271,13 +275,15 @@ First-class dimensions can accomplish the same goal, using PyTorch's existing op
 Here are some examples from the [einops tutorial](http://einops.rocks/pytorch-examples.html) showing what the equivalent code looks like with dimension objects:
 
 ```{code-cell} ipython3
-from einops import rearrange
 def pixel_shuffle_einops(img, upscale_factor=2):
+    from einops import rearrange
     return rearrange(img, 'b (c h2 w2) h w -> b c (h h2) (w w2)', h2=upscale_factor, w2=upscale_factor)
 
 def pixel_shuffle(img, upscale_factor=2):
     h2, w2, c, b, h, w = dims(upscale_factor, upscale_factor)
     return img[b, (c, h2, w2), h, w].order(b, c, (h, h2), (w, w2))
+
+pixel_shuffle(torch.rand(2, 8, 10, 10)).shape
 ```
 
 Restyling Gram matrix for style transfer
@@ -286,21 +292,19 @@ Restyling Gram matrix for style transfer
 def gram_matrix_new_einops(y):
     b, ch, h, w = y.shape
     return torch.einsum('bchw,bdhw->bcd', [y, y]) / (h * w)
-
 ```
 
 ```{code-cell} ipython3
 def gram_matrix_new(y):
     b, c, c2, h, w = dims()
     return (y[b, c, h, w] * y[b, c2, h, w]).sum((h, w)).order(b, c, c2) / (h.size * w.size)
+gram_matrix_new(torch.rand(1, 2, 3, 4))
 ```
-
 
 `vmap`, `xmap`
 ------------
 
 The implicit batching of Rule #1 means it is easy to created batched versions of existing PyTorch code. The way of specifying how to batch has lighter weight syntax as well.
-
 
 ```{code-cell} ipython3
 batch_size, feature_size = 3, 5
@@ -313,7 +317,7 @@ def model(feature_vec):
 
 examples = torch.randn(batch_size, feature_size)
 batch = dims()
-result = model(examples[batch])
+model(examples[batch])
 # vs: result = functorch.vmap(model)(examples)
 ```
 
@@ -347,7 +351,7 @@ def bmm_2(A, B):
     return mm(A[i], B[i])
 ```
 
-Mult-headed Attention
+Multi-headed Attention
 ---------------------
 
 ```{code-cell} ipython3
@@ -390,14 +394,19 @@ def triu(A):
    i,j = dims()
    a = A[i, j]
    return torch.where(i <= j, a, 0).order(i, j)
+triu(torch.rand(3, 4))
 ```
 
 Embedding bag does an embedding table lookup followed by a sum:
+
 ```{code-cell} ipython3
 def embedding_bag(input, embedding_weights):
     batch, sequence = dims()
     r = embedding_weights[input[batch, sequence], features].sum(sequence)
     return r.order(batch, features)
+
+input = torch.tensor([[1, 0, 4, 3]])
+W = torch.rand(5,)
 ```
 
 Relative positional embeddings associate an embedding vector with the distance between the query and the key in the sequence.
@@ -423,7 +432,6 @@ def relative_positional_embedding(q, k, distance_embedding_weight):
     relative_position_scores_key = (k*positional_embedding).sum(features)
     return  (relative_position_scores_query + relative_position_scores_key).order(batch, heads, key_sequence, query_sequence)
 ```
-
 
 Tensor Puzzlers
 ===============
@@ -588,7 +596,6 @@ The most prominent difference between first-class dimensions and alternatives su
 
 Using strings for dimensions introduces the possibility that two unrelated dimensions are given the same name. Using objects instead makes it clear the same names are not the same dimension. It's like the difference between having only global variables, and having the ability to locally bind names in functions.
  For instance, we defined `bmm` by batching a call to `mm`, and even though they both use the name `i` to identify a dimension.  Because each `i` is a different object, there is no naming conflict:
-
 
 ```{code-cell} ipython3
 def mm(A, B):
