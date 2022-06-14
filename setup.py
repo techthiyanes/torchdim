@@ -9,10 +9,10 @@ from torch.utils.cpp_extension import (
 from subprocess import run
 import glob
 
-build_functorch = False
+build_functorch = True
 
 srcs = [
-    'dim/csrc/dim.cpp',
+    'torchdim/csrc/dim.cpp',
 ]
 
 extra_libraries=[]
@@ -31,27 +31,26 @@ if build_functorch:
         for p in glob.glob(os.path.join(extensions_dir, "*.cpp"))
     )
     srcs.extend(extension_sources)
-    print(srcs)
 else:
     import functorch._C
     ft_home = os.path.dirname(os.path.dirname(os.path.abspath(functorch.__file__)))
     extra_libraries.append(functorch._C.__file__)
 
 mintorch_C = CppExtension(
-      'dim._C',
+      'torchdim._C',
       srcs,
       include_dirs = [os.path.dirname(os.path.abspath(__file__)), ft_home],
       extra_compile_args = { "cxx": ["-Wno-write-strings", "-Wno-sign-compare"] },
       extra_link_args = extra_libraries
 )
 
-setup(name='dim',
+setup(name='torchdim',
       version='1.0',
       description='first class dimensions',
       author='',
       author_email='',
       url='',
-      packages=['dim'],
+      packages=['torchdim'],
       ext_modules=[mintorch_C],
       cmdclass={"build_ext": BuildExtension.with_options(no_python_abi_suffix=True)}
      )

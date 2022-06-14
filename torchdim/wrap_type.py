@@ -1,7 +1,7 @@
 import torch
 from types import FunctionType, BuiltinMethodType, MethodDescriptorType, WrapperDescriptorType, GetSetDescriptorType
 from pprint import pprint
-from dim._C import _wrap_method
+from torchdim._C import _wrap_method
 
 FUNC_TYPES = (FunctionType, MethodDescriptorType, BuiltinMethodType, WrapperDescriptorType)
 PROPERTY_TYPES = (GetSetDescriptorType,property)

@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from dim import dims, softmax, cat
+from torchdim import dims, softmax, cat
 import math
 
 

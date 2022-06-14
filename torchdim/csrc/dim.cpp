@@ -52,7 +52,7 @@ static void maybeInitializeGlobals() {
     if (_Tensor.ptr()) {
         return;
     }
-    auto dim = py::import("dim");
+    auto dim = py::import("torchdim");
     _Tensor = dim.attr("_Tensor");
     pointwise = dim.attr("pointwise");
     _Tensor_sum = _Tensor.attr("sum");
@@ -102,7 +102,7 @@ static void initializeGlobals(Arena & A) {
 py::handle DimensionBindError_;
 static py::handle DimensionBindError() {
     if(!DimensionBindError_.ptr()) {
-        DimensionBindError_ = py::import("dim").attr("DimensionBindError");
+        DimensionBindError_ = py::import("torchdim").attr("DimensionBindError");
     }
     return DimensionBindError_;
 }
@@ -155,7 +155,7 @@ struct Dim : public py::base<Dim> {
     }
     static py::obj<Dim> create(py::object name, int64_t s = -1) {
         if (!DimType) {
-            DimType = (PyTypeObject*) py::import("dim").attr("Dim").ptr();
+            DimType = (PyTypeObject*) py::import("torchdim").attr("Dim").ptr();
         }
         auto r = Dim::alloc(DimType);
         r->init(std::move(name), s);
@@ -684,7 +684,7 @@ public:
 
     static py::obj<Tensor> create() {
         if (!TensorType) {
-            TensorType = (PyTypeObject*) py::import("dim").attr("Tensor").ptr();
+            TensorType = (PyTypeObject*) py::import("torchdim").attr("Tensor").ptr();
         }
         return Tensor::alloc(TensorType);
     }
@@ -1742,7 +1742,7 @@ static PyObject* _wrap_method(PyObject *self,
     // XXX - ignore python function wrapped, we will call torch function directly
     py::handle orig = args[0];
     if (!pointwise.ptr()) {
-        auto dim = py::import("dim");
+        auto dim = py::import("torchdim");
         pointwise = dim.attr("pointwise");
     }
     bool is_pointwise = pointwise.contains(orig);

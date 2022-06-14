@@ -4,8 +4,8 @@ import inspect
 import dis
 from .tree_map import tree_flatten, tree_map
 from .wrap_type import wrap_type
-import dim._C as _C
-from dim._C import dims, DimList
+import torchdim._C as _C
+from torchdim._C import dims, DimList
 
 
 class DimensionMismatchError(Exception):

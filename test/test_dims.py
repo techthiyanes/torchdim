@@ -1,5 +1,5 @@
-import dim
-from dim import Tensor, Dim, dims, stack, DimensionBindError, cat, DimList
+import torchdim as dim
+from torchdim import Tensor, Dim, dims, stack, DimensionBindError, cat, DimList
 
 from attn_ft import BertSelfAttention as BertSelfAttentionA, Linear
 from attn_positional import BertSelfAttention as BertSelfAttentionB
@@ -11,7 +11,7 @@ import refcycle
 from torchvision.models import resnet18
 
 
-from dim._C import _test_c, _n_levels_in_use, _parse_test
+from torchdim._C import _test_c, _n_levels_in_use, _parse_test
 
 from contextlib import contextmanager
 from time import perf_counter
