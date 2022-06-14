@@ -16,14 +16,18 @@ kernelspec:
 First-class Dimensions
 ======================
 
-_The functionality of [einops](http://einops.rocks) (einsum, rearrange), batching ([vmap](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap), [xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html)), and tensor indexing with one new concept_
+_The functionality of [einops](http://einops.rocks) (einsum, rearrange), batching ([vmap](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap), [xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html)), and tensor indexing with one new concept in PyTorch_
 
 The tensor input to a resnet might have the shape [8, 3, 224, 224] but informally we think of those dimensions as 'batch', 'channel', 'width', and 'height'. Eventhough 'width' and 'height' have the same _size_ we still think of them as separate dimensions, and if we have two _different_ images, we think of both as sharing the _same_ 'channel' dimension.
 
  Instead of treating this concept informally, first-class dimensions introduce a Python object, a `Dim`, to represent the concept. By expanding the semantics of tensors with dim objects, we can get behavior equivalent to batching transforms (xmap, vmap), einops-style rearragement, and loop-style tensor indexing.
 
- Installation
- ============
+Installation
+============
+
+First-class dims are a library that extends PyTorch, so they need to be installed separately.
+We may eventually upstream them into PyTorch itself along with `functorch`.
+
 We have to install a nightly build of PyTorch so first set up an environment:
 
     conda create --name dim
@@ -32,11 +36,11 @@ We have to install a nightly build of PyTorch so first set up an environment:
 First-class dims requires a fairly recent nightly build of PyTorch so that functorch will work. You can install it using one of these commands:
 
     # For CUDA 10.2
-    pip install --pre torch -f https://download.pytorch.org/whl/nightly/cu102/torch_nightly.html --upgrade
+    conda install pytorch torchvision torchaudio cudatoolkit=10.2 -c pytorch
     # For CUDA 11.3
-    pip install --pre torch -f https://download.pytorch.org/whl/nightly/cu113/torch_nightly.html --upgrade
+    conda install pytorch torchvision torchaudio cudatoolkit=11.3 -c pytorch
     # For CPU-only build
-    pip install --pre torch -f https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html --upgrade
+    conda install pytorch torchvision torchaudio cpuonly -c pytorch
 
 Install dim. You will be asked for github credentials to access the fairinternal organization.
 
@@ -47,7 +51,7 @@ Install dim. You will be asked for github credentials to access the fairinternal
 Creating and Binding Dims
 =========================
 
-Python objects that represent dimension are created using the `dims` operator.[^1]
+Python objects that represent dimension are created using the `dims` operator, which will return as many new dimensions as it is assigned to.[^1]
 
 ```{code-cell} ipython3
 import torch
@@ -56,7 +60,7 @@ from dim import dims
 batch, channel, width, height = dims()
 ```
 
-Other representations such as [Named Tensor](https://pytorch.org/docs/stable/named_tensor.html) in PyTorch, or  [JAX's xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html) use strings to name dimensions. We call these dimensions _first class_ because they are instead Python objects.
+Other representations such as [Named Tensor](https://pytorch.org/docs/stable/named_tensor.html) in PyTorch, or  [JAX's xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html) use strings to name dimensions. We call these dimensions _first class_ because they are Python objects.
 
 In addition to the normal _positional_ dimensions in a tensor, tensors can also have a separate set of first-class dimensions. You can create tensors with first-class dimensions by binding them using indexing:
 
@@ -104,7 +108,7 @@ except:
 j = dims(4) # can also be set on construction
 ```
 
-[^1]: We use a bit of Python introspection using the C API to so that `dims` always returns the number of dimensions it is bound to and sets their debug names well.
+[^1]: To implement `dims`, we use a bit of Python introspection using the C API to so that it always returns the number of dimensions it is bound to and sets their debug names to the variable name.
 
 Semantics of Dimensions
 =======================
@@ -114,16 +118,26 @@ Rule 1: Implicit Batching
 -------------------------
 **Tensor operations (e.g. `input + bias`) are implicitly batched over the union of the first-class dimensions in their inputs.**
 
-If `input` has dimensions `batch, channel` and `bias` has dimension `channel`, the output will have the union of those dimensions (`batch, channel`), and the result will computed as if there was a loop over all the first-class dimensions. It is helpful think of operators on tensors with first-class dimensions by analogy to code with explicit loops over dimensions, with the first-class dimensions of the inputs acting as implicit `for` loops, and the values in the tensor being scalars within the body of the loop:
+If `input` has dimensions `batch, channel` and `bias` has dimension `channel`, the output will have the union of those dimensions (`batch, channel`), and the result will computed as if there was a loop over all the first-class dimensions.
+
+```{code-cell} ipython3
+input = torch.rand(128, 32)
+bias = torch.rand(32)
+batch, channels = dims()
+result = input[batch, channels] + bias[channels]
+print(result.dims)
+```
+
+It is helpful think of operators on tensors with first-class dimensions by analogy to code with explicit loops over dimensions, with the first-class dimensions of the inputs acting as implicit `for` loops, and the values in the tensor being scalars within the body of the loop:
 
     # mental model: loop-level analogy
     for batch in range(batch.size):
         for channel in range(channel.size):
-            compute input + bias # arithmetic on scalars
+            result[batch, channels] = input[batch, channels] + bias[channels] # arithmetic on scalars
 
-Positional dimensions behave as they did before (e.g. for + they will broadcast), and can be thought of as being standard tensor _used within the implicit loops_ defined by first-class dimensions.
+Positional dimensions behave as they did before (e.g. for + they will broadcast), and can be thought of as being a standard tensor _used within the implicit loops_ defined by first-class dimensions.
 
- This rule parallels the rules for named dimensions in xmap, or the implicitly batched dimensions in vmap.
+This rule parallels the rules for named dimensions in xmap, or the implicitly batched dimensions in vmap.
 
 Rule 2: Specifying dimensions
 -----------------------------
@@ -154,7 +168,7 @@ This means that a dimensions used as a tensor acts as an index into that dimensi
     for channels in range(batch.size):
         compute channels + 1000
 
-This makes doing complicated indexing arithmetic appear the same as it would in a for loop, but without executing a loop in Python. Consider what a lookup from an embedding table would look like:
+This makes doing complicated indexing arithmetic appear the same as it would in a for loop, but without executing a loop in Python. Here is code that lookups up features in an embedding table given a sequence of ids:
 
 ```{code-cell} ipython3
 sequence, features = dims()
@@ -173,6 +187,7 @@ With the following analogy to loops:
         for features in range(embeddings.size(1)):
             state = embeddings[words[sequence], features]
 
+Earlier we showed how to bind tensors dimensions is done with indexing `A[i, j]`. In fact, this binding is just the normal indexing operator. Its behavior follows directly from the behavior of indexing with tensor indices combined with Rule #3 and Rule #1. The expression `A[i + 1, j]` also creates a tensor with dimensions `i` and `j` but with a different indexing math. The implementation knows when simple indexing patterns are used and only actually runs a kernel to do indexing when needed.
 
 Unbinding Dims
 -------------
@@ -187,7 +202,7 @@ A_T = A[i, j].order(j, i)
 assert torch.allclose(A.T, A_T)
 ```
 
-[^2] `order` is actually just a synonym for the already-existing `permute` method, which takes a list a dimension specifiers and orders the specified dimensions in that order. By Rule #2 implies that first class dims can be passed as arguments to permute, ordering them. However, the name `permute` is confusing in this context since it implies dim objects have an original order, we prefer to use `order` when writing code.
+[^2] `order` is actually just a synonym for the already-existing `permute` method, which takes a list a dimension specifiers and puts the tensor in that order because rule #2 says that first-class dims can be passed as arguments to functions that previousely took only integers as dimension. However, the name `permute` is confusing in this context since it implies dim objects have an original order, so we prefer to use `order` when writing code.
 
 Flattening and Splitting Dims
 -----------------------------
@@ -212,8 +227,10 @@ The size of one unsized dimension in a tuple such as `i` can be inferred if the 
 Examples
 ========
 
-einsum-style products
-------
+Einsum-style Products
+---------------------
+
+what is einsum, how we detect matrix multiplies. Examples of matrix multiples and usage of vmaps.
 
 ```{code-cell} ipython3
 def mm(A, B):
@@ -230,12 +247,6 @@ def bmm(A, B):
 ```
 
 ```{code-cell} ipython3
-def bmm_2(A, B):
-    i = dims() # note: doesn't matter than mm internally also uses i
-    return mm(A[i], B[i])
-```
-
-```{code-cell} ipython3
 from dim import softmax
 def attention(K, Q, V):
     batch, channel, key, query = dims()
@@ -245,8 +256,9 @@ def attention(K, Q, V):
     return torch.cat((R.order(batch, channel, query), Q), dim=1)
 ```
 
-einops
+`einops`
 ------
+What are einops, the basic equivalences
 [einops tutorial](http://einops.rocks/pytorch-examples.html)
 
 ```{code-cell} ipython3
@@ -259,8 +271,8 @@ def pixel_shuffle(img, upscale_factor=2):
     return img[b, (c, h2, w2), h, w].order(b, c, (h, h2), (w, w2))
 ```
 
-
 Restyling Gram matrix for style transfer
+
 ```{code-cell} ipython3
 def gram_matrix_new_einops(y):
     b, ch, h, w = y.shape
@@ -268,9 +280,15 @@ def gram_matrix_new_einops(y):
 
 ```
 
+```{code-cell} ipython3
+def gram_matrix_new(y):
+    b, c, c2, h, w = dims()
+    return (y[b, c, h, w] * y[b, c2, h, w]).sum((h, w)).order(b, c, c2) / (h.size * w.size)
+```
 
-vmap, xmap
-----------
+
+`vmap`, `xmap`
+------------
 
 Rule #1 means that is easy to implicitly batch things. The way of specifying how to batch has lighter weight syntax as well.
 
@@ -288,10 +306,25 @@ batch = dims()
 model(examples[batch])
 ```
 
-note the awkward mapping/unmapping apis in xmap
+Because xmap and vmap are transforms over functions, there is a lot of syntactic distance between the specification of the dimension mappings, and the values where those mappings apply. Dims express the mapping as indexing of the tensor, right at the place where the function is being applied.
 
+```
+xmap example
+```
 
-mult-headed attension
+```
+equivalent dims
+```
+
+This pattern also composes well with other code that also uses first class dimensions.
+
+```{code-cell} ipython3
+def bmm_2(A, B):
+    i = dims() # note: doesn't matter than mm internally also uses i
+    return mm(A[i], B[i])
+```
+
+Mult-headed Attention
 ---------------------
 
 ```{code-cell} ipython3
@@ -320,8 +353,13 @@ def multiheadattention(q, k, v, num_attention_heads, dropout_prob, use_positiona
     return context_layer.order(batch, query_sequence, [heads, features])
 ```
 
-indirect indexing
------------------
+Notice the combination of features: binding dimensions and unflattening heads from the features, using einsum style products, and calling dropout through implicit batching.
+
+Indexing
+--------
+
+Rule #3 enables indexing by allowing dimensions to act as loop indices when used as a Tensor value.
+So it is easy to have code conditionally execute based on indices, such as computing upper triangular:
 
 ```{code-cell} ipython3
 from torch import where
@@ -331,6 +369,7 @@ def triu(A):
    return torch.where(i <= j, a, 0).order(i, j)
 ```
 
+Embedding bag does an embedding table lookup followed by a sum:
 ```{code-cell} ipython3
 def embedding_bag(input, embedding_weights):
     batch, sequence = dims()
@@ -339,7 +378,7 @@ def embedding_bag(input, embedding_weights):
 ```
 
 Relative positional embeddings associate an embedding vector with the distance between the query and the key in the sequence.
-For instance, a key two elements after query after key will get embedding ID 2. We can use first-class dimensions to do the indexing arithmetic, and embedding lookup.
+For instance, a key two elements after query after key will get embedding ID 2. We can use first-class dimensions to do the indexing arithmetic, and embedding lookup:
 
 ```{code-cell} ipython3
 def relative_positional_embedding(q, k, distance_embedding_weight):
@@ -361,20 +400,15 @@ def relative_positional_embedding(q, k, distance_embedding_weight):
 ```
 
 
-    upper triangular
+Tensor Puzzlers
+===============
 
-+++
-
-tensor puzzlers
-============
-
-[Tensor Puzzlers](https://github.com/srush/Tensor-Puzzles) are a good excersize for learning the numpy and torch APIs by figuring out how to define common operations using a small set of primitive tensor operations.
+[Tensor Puzzlers](https://github.com/srush/Tensor-Puzzles), created by Sasha Rush, are a good excersize for learning the numpy and torch APIs by figuring out how to define common operations using a small set of primitive tensor operations.
 
 However, the difficulty of many of the puzzlers lies not in how to compute the answer but the awkwardness of the primitives themselves.
 
 **With first class dimensions, these puzzlers are nearly the same as the spec that defines them**
 
-+++
 
 ### Puzzle 3 - outer
 
@@ -418,7 +452,7 @@ def eye_spec(out):
 
 def eye(j: int):
     i,j = dims(j, j)
-    return where(i.eq(j), 1, 0).order(i, j)
+    return where(i == j, 1, 0).order(i, j)
 ```
 
 ### Puzzle 6 - triu
@@ -466,7 +500,7 @@ def vstack_spec(a, b, out):
 
 def vstack(a, b):
     v, i = dims(2)
-    return where(v.eq(0),  a[i], b[i]).order(v, i)
+    return where(v == 0,  a[i], b[i]).order(v, i)
 ```
 
 ### Puzzle 10 - roll
@@ -523,12 +557,12 @@ def sequence_mask(values, length):
 Advantages of First-class Dimensions over Named (string) Dimensions
 ===================================================================
 
-The most prominent difference between first-class dimensions and alternatives such as einops, named tensors, or xmap is that dimensions are objects rather than strings. Using objects has a number of nice properties.
+The most prominent difference between first-class dimensions and alternatives such as einops, named tensors (and [tensors considered harmful](https://nlp.seas.harvard.edu/NamedTensor), or xmap is that dimensions are objects rather than strings. Using objects has a number of nice properties.
 
 ### Avoiding naming conflicts
 
-Using strings for dimensions introduces the possibility that two unrelated dimensions are given the same name. Using objects instead makes it clear the same names are not the same dimension. For instance, we defined `bmm` by batching a call to
-to `mm`, and even though they both use the name `i` to identify a dimension.  Because each `i` is a different object, there is no naming conflict:
+Using strings for dimensions introduces the possibility that two unrelated dimensions are given the same name. Using objects instead makes it clear the same names are not the same dimension. It's like the difference between having only global variables, and having the ability to locally bind names in functions.
+ For instance, we defined `bmm` by batching a call to `mm`, and even though they both use the name `i` to identify a dimension.  Because each `i` is a different object, there is no naming conflict:
 
 
 ```{code-cell} ipython3
@@ -545,9 +579,23 @@ def bmm(A, B):
 Einops avoids conflicts by ensuring names are all introduced and removed in a single expression, but this precludes using long-lived dimensions to present implicit batching similar to xmap. When nested, JAX's xmap seems to consider axes the same if the string name matches. In the above example it would consider the `i` dimension to be the same dimension in both `bmm` and `mm` so the code would error.
 
 
-With string dimensions, we have to be careful not
+### Reuse the same operator set
 
-* einops add new operators and lack rule #1
-* strings for dimensions prevent having rule #3, which then requries additional operators to bind dimensions because it cannot be a property of indexing.
-* Avoiding accidental capture and name collisions with local binding.
-* Ability to define dim-specific operators directly on the dimenision
+Having a new object type allows us to extend the existing operator set of PyTorch rather than come up with new operators. For instance, binding dimensions using indexing follows semanticalaly from Rules #1 and #3, so there is no need for a special operator to do binding. Even unbinding is just the `permute` operator which follows from Rule #2, though we call it `order` for clarity. In contrast, using strings requires coming up with new APIs such as `einsum` for matrix multiplies, or `rearrange` for doing permutations.
+
+### Allows dims to act as tensors
+
+Rule #3 is not possible with strings since we cannot make strings behave as tensors. Without this rule, all of the indirect indexing that dims enable would not longer be easy to express.
+
+### Dims can have methods
+For instance, as objects, dims can have a size, which allows us to do size inference of dimensions in various places in the API where string based APIs would have to take additional arguments specifying size.
+
+
+Comparison to tensor compilers
+==============================
+
+TVM, Halide, XLA, Dex
+* ability to still have slow dynamically typed execution
+* no syntactic overhead switching between the compiled mode and the python mode
+* Tensors do not have to be entirely in loop-style mode or pytorch mode, tensors with some first-class dims can compute through normal tensor code.
+* We still have the oppurtunity to optimize by lazily implementing some operators similar to how multiply and sum work now.
