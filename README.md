@@ -45,7 +45,7 @@ First-class dims requires a fairly recent nightly build of PyTorch so that funct
 Install dim. You will be asked for github credentials to access the fairinternal organization.
 
     pip install ninja  # Makes the build go faster
-    pip install --user "git+https://github.com/fairinternal/dynamic_torchscript_experiments#egg=dim&subdirectory=dim"
+    pip install --user "git+https://github.com/fairinternal/torchdim"
 
 
 Creating and Binding Dims
@@ -227,10 +227,11 @@ The size of one unsized dimension in a tuple such as `i` can be inferred if the 
 Examples
 ========
 
+The usefulness of dimension objects is best seen through examples. Let's look at some different ways they can be used.
+
 Einsum-style Products
 ---------------------
-
-what is einsum, how we detect matrix multiplies. Examples of matrix multiples and usage of vmaps.
+Rather than having [einsum](https://pytorch.org/docs/stable/generated/torch.einsum.html) as a custom operator, it is possible to express matrix products directly as a composition of multiplies and summations. The implementation will pattern match any multiplication followed by a sum to the right matrix-multiply operator.
 
 ```{code-cell} ipython3
 def mm(A, B):
@@ -239,12 +240,16 @@ def mm(A, B):
     return r.order(i, j)
 ```
 
+Creating a batched version of multiply is easy, just add a `b` dimensions to everything:
+
 ```{code-cell} ipython3
 def bmm(A, B):
     b, i, j, k = dims()
     r = (A[b, i, k] * B[b, k, j]).sum(k)
     return r.order(b, i, j)
 ```
+
+You no longer need to recognize that productions like attension are matrix multiplies, the canonical way of writing them will turn into the right optimized operators:
 
 ```{code-cell} ipython3
 from dim import softmax
@@ -258,8 +263,12 @@ def attention(K, Q, V):
 
 `einops`
 ------
-What are einops, the basic equivalences
-[einops tutorial](http://einops.rocks/pytorch-examples.html)
+
+[Einops](http://einops.rocks) is an extension to einsum that adds support for the manipulation of dimensions through a few custom operators such as `rearrange` or `repeat`.
+
+First-class dimensions can accomplish the same goal, using PyTorch's existing operator set.
+
+Here are some examples from the [einops tutorial](http://einops.rocks/pytorch-examples.html) showing what the equivalent code looks like with dimension objects:
 
 ```{code-cell} ipython3
 from einops import rearrange
@@ -290,7 +299,8 @@ def gram_matrix_new(y):
 `vmap`, `xmap`
 ------------
 
-Rule #1 means that is easy to implicitly batch things. The way of specifying how to batch has lighter weight syntax as well.
+The implicit batching of Rule #1 means it is easy to created batched versions of existing PyTorch code. The way of specifying how to batch has lighter weight syntax as well.
+
 
 ```{code-cell} ipython3
 batch_size, feature_size = 3, 5
@@ -303,20 +313,33 @@ def model(feature_vec):
 
 examples = torch.randn(batch_size, feature_size)
 batch = dims()
-model(examples[batch])
+result = model(examples[batch])
+# vs: result = functorch.vmap(model)(examples)
 ```
 
 Because xmap and vmap are transforms over functions, there is a lot of syntactic distance between the specification of the dimension mappings, and the values where those mappings apply. Dims express the mapping as indexing of the tensor, right at the place where the function is being applied.
 
+
+[xmap examples](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html):
 ```
-xmap example
+in_axes = [['inputs', 'hidden', ...],
+           ['hidden', 'classes', ...],
+           ['batch', 'inputs', ...],
+           ['batch', ...]]
+
+loss = xmap(named_loss, in_axes=in_axes, out_axes=[...])
+print(loss(w1, w2, images, labels))
 ```
 
+Dimension objects:
+
 ```
-equivalent dims
+batch, inputs, hidden, classes = dims()
+print(loss(w1[inputs, hidden], w2[hidden, classes], images[batch, inputs], labels[batch]))
 ```
 
-This pattern also composes well with other code that also uses first class dimensions.
+This pattern also composes well with other code that also uses first class dimensions. For instance, another way to write `bmm` from above is to batch the `mm` operator.
+It doesn't matter whether the implementation of the function uses dimension objects, it is also possible to add additional batch dimensions and then call a function:
 
 ```{code-cell} ipython3
 def bmm_2(A, B):
@@ -358,8 +381,8 @@ Notice the combination of features: binding dimensions and unflattening heads fr
 Indexing
 --------
 
-Rule #3 enables indexing by allowing dimensions to act as loop indices when used as a Tensor value.
-So it is easy to have code conditionally execute based on indices, such as computing upper triangular:
+Rule #3 enables indexing because dimensions act as loop indices when used as a tensor.
+It is easy to have computed based on indices, such as the upper triangular operator:
 
 ```{code-cell} ipython3
 from torch import where
@@ -392,8 +415,10 @@ def relative_positional_embedding(q, k, distance_embedding_weight):
 
     assert key_sequence.size + bias <= n_embeddings
 
+    # indexing with dims
     positional_embedding = distance_embedding_weight[distance + index_bias, features]
 
+    # matrix multiplies with dims
     relative_position_scores_query = (q*positional_embedding).sum(features)
     relative_position_scores_key = (k*positional_embedding).sum(features)
     return  (relative_position_scores_query + relative_position_scores_key).order(batch, heads, key_sequence, query_sequence)
@@ -593,9 +618,10 @@ For instance, as objects, dims can have a size, which allows us to do size infer
 
 Comparison to tensor compilers
 ==============================
+(unfinished)
 
 TVM, Halide, XLA, Dex
 * ability to still have slow dynamically typed execution
 * no syntactic overhead switching between the compiled mode and the python mode
-* Tensors do not have to be entirely in loop-style mode or pytorch mode, tensors with some first-class dims can compute through normal tensor code.
+* Tensors do not have to be entirely in loop-explicit mode or pytorch mode, tensors with some first-class dims can compute through normal tensor code.
 * We still have the oppurtunity to optimize by lazily implementing some operators similar to how multiply and sum work now.
