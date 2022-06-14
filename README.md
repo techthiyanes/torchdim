@@ -13,8 +13,8 @@ kernelspec:
   name: python3
 ---
 
-First-class Dimensions
-======================
+First-class Dimensions for PyTorch
+==================================
 
 _The functionality of [einops](http://einops.rocks) (einsum, rearrange), batching ([vmap](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap), [xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html)), and tensor indexing with one new concept in PyTorch_
 
